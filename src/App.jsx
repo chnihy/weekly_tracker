@@ -50,6 +50,20 @@ function saveLocalState(state) {
   try { localStorage.setItem(STATE_KEY, JSON.stringify(state)); } catch {}
 }
 
+function useMediaQuery(query) {
+  const [matches, setMatches] = useState(() =>
+    typeof window !== "undefined" && window.matchMedia(query).matches
+  );
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    const onChange = e => setMatches(e.matches);
+    mql.addEventListener("change", onChange);
+    setMatches(mql.matches);
+    return () => mql.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
+}
+
 async function fetchRemote(pin) {
   const r = await fetch("/api/state", { headers: { "x-pin": pin } });
   if (r.status === 401) throw new Error("bad_pin");
@@ -95,6 +109,25 @@ const STATUS_COLOR = {
 };
 
 export default function App() {
+  const wide = useMediaQuery("(min-width: 700px)");
+  const theme = wide ? {
+    maxWidth: 720,
+    gridCols: "1fr repeat(7, 52px)",
+    rowPad: "0 24px",
+    titleSize: 24,
+    checkSize: 26,
+    checkBorder: 2,
+    rowHeight: 52,
+  } : {
+    maxWidth: 440,
+    gridCols: "1fr repeat(7, 32px)",
+    rowPad: "0 16px",
+    titleSize: 22,
+    checkSize: 22,
+    checkBorder: 1.5,
+    rowHeight: 44,
+  };
+
   const weekKey = getWeekKey();
   const [state, setState] = useState(loadLocalState);
   const [pin, setPin] = useState(() => {
@@ -235,9 +268,6 @@ export default function App() {
   const weekTotal = tasks.length * 7;
   const pct = weekTotal ? Math.round((weekDone / weekTotal) * 100) : 0;
 
-  const gridCols = "1fr repeat(7, 32px)";
-  const rowPad = "0 16px";
-
   return (
     <div style={{
       minHeight: "100vh", background: "#f7f7f7",
@@ -245,15 +275,15 @@ export default function App() {
       fontFamily: FONT, WebkitFontSmoothing: "antialiased",
     }}>
       <div style={{
-        width: "100%", maxWidth: 440, minHeight: "100vh", background: "#fff",
+        width: "100%", maxWidth: theme.maxWidth, minHeight: "100vh", background: "#fff",
         borderLeft: "1px solid #ececec", borderRight: "1px solid #ececec",
         display: "flex", flexDirection: "column",
         paddingBottom: "env(safe-area-inset-bottom)",
       }}>
         {/* Header */}
-        <div style={{ padding: "calc(env(safe-area-inset-top) + 18px) 16px 14px" }}>
+        <div style={{ padding: `calc(env(safe-area-inset-top) + 18px) ${wide ? 24 : 16}px 14px` }}>
           <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
-            <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: -0.3 }}>Weekly Tracker</div>
+            <div style={{ fontSize: theme.titleSize, fontWeight: 600, letterSpacing: -0.3 }}>Weekly Tracker</div>
             <div style={{ fontSize: 14, color: "#555", fontVariantNumeric: "tabular-nums" }}>{pct}%</div>
           </div>
           <div style={{
@@ -278,7 +308,7 @@ export default function App() {
 
         {/* Day header row */}
         <div style={{
-          display: "grid", gridTemplateColumns: gridCols, padding: rowPad,
+          display: "grid", gridTemplateColumns: theme.gridCols, padding: theme.rowPad,
           gap: 2, marginBottom: 2, alignItems: "center",
         }}>
           <div />
@@ -297,7 +327,7 @@ export default function App() {
           {tasks.map((task, ti) => (
             editingIdx === ti ? (
               <div key={ti} style={{
-                padding: "10px 16px", borderTop: "1px solid #f0f0f0",
+                padding: `10px ${wide ? 24 : 16}px`, borderTop: "1px solid #f0f0f0",
                 display: "flex", gap: 8, alignItems: "center",
               }}>
                 <input
@@ -318,7 +348,7 @@ export default function App() {
               </div>
             ) : (
               <div key={ti} style={{
-                display: "grid", gridTemplateColumns: gridCols, padding: rowPad,
+                display: "grid", gridTemplateColumns: theme.gridCols, padding: theme.rowPad,
                 gap: 2, alignItems: "center", borderTop: "1px solid #f0f0f0",
               }}>
                 <div
@@ -338,13 +368,13 @@ export default function App() {
                       onClick={() => toggle(ti, di)}
                       style={{
                         display: "flex", alignItems: "center", justifyContent: "center",
-                        height: 44, cursor: "pointer",
+                        height: theme.rowHeight, cursor: "pointer",
                         background: today ? "#fafafa" : "transparent",
                       }}
                     >
                       <div style={{
-                        width: 22, height: 22, borderRadius: "50%",
-                        border: on ? "none" : "1.5px solid #d0d0d0",
+                        width: theme.checkSize, height: theme.checkSize, borderRadius: "50%",
+                        border: on ? "none" : `${theme.checkBorder}px solid #d0d0d0`,
                         background: on ? "#000" : "transparent",
                         display: "flex", alignItems: "center", justifyContent: "center",
                         transition: "background .15s, border-color .15s",
@@ -364,7 +394,7 @@ export default function App() {
         </div>
 
         {/* Add task */}
-        <div style={{ borderTop: "1px solid #f0f0f0", padding: "10px 16px 16px" }}>
+        <div style={{ borderTop: "1px solid #f0f0f0", padding: `10px ${wide ? 24 : 16}px 16px` }}>
           {showAdd ? (
             <div style={{ display: "flex", gap: 8 }}>
               <input
