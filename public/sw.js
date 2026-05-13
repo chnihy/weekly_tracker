@@ -1,4 +1,4 @@
-const CACHE = 'weekly-tracker-v1';
+const CACHE = 'weekly-tracker-v2';
 const ASSETS = ['/', '/index.html', '/manifest.json'];
 
 self.addEventListener('install', e => {
@@ -15,16 +15,35 @@ self.addEventListener('activate', e => {
 
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
-  e.respondWith(
-    caches.match(e.request).then(cached => {
-      if (cached) return cached;
-      return fetch(e.request).then(resp => {
-        if (resp.ok && new URL(e.request.url).origin === location.origin) {
+  const url = new URL(e.request.url);
+  if (url.origin !== location.origin) return;
+  if (url.pathname.startsWith('/api/')) return;
+
+  const isNav = e.request.mode === 'navigate'
+    || (e.request.headers.get('accept') || '').includes('text/html');
+
+  if (isNav) {
+    e.respondWith(
+      fetch(e.request).then(resp => {
+        if (resp.ok) {
           const clone = resp.clone();
           caches.open(CACHE).then(c => c.put(e.request, clone));
         }
         return resp;
-      }).catch(() => cached);
-    })
-  );
+      }).catch(() => caches.match(e.request).then(c => c || caches.match('/index.html')))
+    );
+  } else {
+    e.respondWith(
+      caches.match(e.request).then(cached => {
+        if (cached) return cached;
+        return fetch(e.request).then(resp => {
+          if (resp.ok) {
+            const clone = resp.clone();
+            caches.open(CACHE).then(c => c.put(e.request, clone));
+          }
+          return resp;
+        }).catch(() => cached);
+      })
+    );
+  }
 });
