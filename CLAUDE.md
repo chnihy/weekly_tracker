@@ -33,15 +33,25 @@ The PIN is stored per-device in `localStorage` under `wt_pin`. Setting it is sur
 
 ## Deploy
 
-**Auto-deploy via GitHub push is BLOCKED** by Vercel. Every commit pushed to `main` creates a deployment that stays in `BLOCKED`/`buildSkipped: true` state with `errorLink` pointing at `troubleshoot-project-collaboration#account-configuration`. Disabling `gitForkProtection` didn't help; root cause likely an unverified Vercel account email or commit-author trust issue (see Hobby-tier limitations).
+`git push origin main` triggers an auto-build on Vercel that ships to `weeklytracker.vercel.app`.
 
-**Working deploy command:**
+**Commit author email matters.** Vercel's git integration BLOCKS commits whose author email isn't recognized as belonging to the connected GitHub account (`chnihy`). Use Chresten's GitHub noreply email:
+
+```
+69132469+chnihy@users.noreply.github.com
+```
+
+Set it once locally so every commit uses it without having to remember:
+
+```
+git config user.email 69132469+chnihy@users.noreply.github.com
+```
+
+If you ever need to bypass git and ship local code directly:
 
 ```
 npx vercel --prod --yes
 ```
-
-Run from the project root. This bypasses the broken git integration and ships current local code in ~10s.
 
 ## Vercel env vars (required for sync to work)
 
