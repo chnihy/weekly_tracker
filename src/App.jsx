@@ -27,7 +27,10 @@ function formatWeekLabel(weekKey) {
 function loadLocalState() {
   try {
     const cached = localStorage.getItem(STATE_KEY);
-    if (cached) return JSON.parse(cached);
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      return { version: 0, ...parsed };
+    }
   } catch {}
   try {
     const oldTasks = JSON.parse(localStorage.getItem("wt_tasks_v1") || "null");
@@ -40,10 +43,10 @@ function loadLocalState() {
           catch {}
         }
       }
-      return { tasks: oldTasks, checksByWeek };
+      return { tasks: oldTasks, checksByWeek, version: 0 };
     }
   } catch {}
-  return { tasks: DEFAULT_TASKS, checksByWeek: {} };
+  return { tasks: DEFAULT_TASKS, checksByWeek: {}, version: 0 };
 }
 
 function saveLocalState(state) {
@@ -136,6 +139,8 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState(pin ? "syncing" : "local");
   const [pinModal, setPinModal] = useState(false);
   const loadedRef = useRef(false);
+  const stateRef = useRef(null);
+  const pinRef = useRef(pin);
 
   const [editingIdx, setEditingIdx] = useState(null);
   const [editVal, setEditVal] = useState("");
@@ -158,9 +163,11 @@ export default function App() {
     setSyncStatus("syncing");
     fetchRemote(pin).then(server => {
       if (cancelled) return;
-      if (server && server.tasks) {
+      const serverVersion = server?.version || 0;
+      const localVersion = state.version || 0;
+      if (server && server.tasks && serverVersion > localVersion) {
         setState(server);
-      } else {
+      } else if (!server || !server.tasks || localVersion > serverVersion) {
         pushRemote(pin, state).catch(() => {});
       }
       setSyncStatus("synced");
@@ -183,6 +190,8 @@ export default function App() {
   }, [pin]);
 
   useEffect(() => {
+    stateRef.current = state;
+    pinRef.current = pin;
     if (!loadedRef.current) return;
     saveLocalState(state);
     if (!pin) return;
@@ -199,10 +208,38 @@ export default function App() {
     return () => clearTimeout(t);
   }, [state, pin]);
 
-  const updateTasks = (fn) => setState(prev => ({ ...prev, tasks: fn(prev.tasks) }));
+  useEffect(() => {
+    const flush = () => {
+      const p = pinRef.current;
+      const s = stateRef.current;
+      if (!p || !s || !loadedRef.current) return;
+      try {
+        fetch("/api/state", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-pin": p },
+          body: JSON.stringify(s),
+          keepalive: true,
+        });
+      } catch {}
+    };
+    const onVis = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
+
+  const updateTasks = (fn) => setState(prev => ({
+    ...prev,
+    tasks: fn(prev.tasks),
+    version: (prev.version || 0) + 1,
+  }));
   const updateChecks = (fn) => setState(prev => ({
     ...prev,
-    checksByWeek: { ...prev.checksByWeek, [weekKey]: fn(prev.checksByWeek[weekKey] || {}) }
+    checksByWeek: { ...prev.checksByWeek, [weekKey]: fn(prev.checksByWeek[weekKey] || {}) },
+    version: (prev.version || 0) + 1,
   }));
 
   const toggle = (ti, di) =>
@@ -234,7 +271,7 @@ export default function App() {
         }
         newChecksByWeek[wk] = shifted;
       }
-      return { tasks: newTasks, checksByWeek: newChecksByWeek };
+      return { tasks: newTasks, checksByWeek: newChecksByWeek, version: (prev.version || 0) + 1 };
     });
     setEditingIdx(null);
   };
