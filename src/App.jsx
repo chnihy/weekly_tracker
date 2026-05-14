@@ -245,13 +245,12 @@ function useDragAndDrop({ onDrop, resolveTarget }) {
     cleanup();
   };
 
-  // mode: "touch-longpress" (only acts on touch) or "immediate" (only acts on mouse/pen).
-  const startDrag = (kind, id, mode = "touch-longpress") => (e) => {
+  // mode: "touch-longpress" (only acts on touch, requires 250ms hold) or "immediate" (drags on touchdown — used by the handle on both touch and mouse).
+  const startDrag = (kind, id, mode = "immediate") => (e) => {
     if (e.button != null && e.button !== 0) return;
     if (dragRef.current) return;
     const isTouch = e.pointerType === "touch";
     if (mode === "touch-longpress" && !isTouch) return;
-    if (mode === "immediate" && isTouch) return;
     dragRef.current = { kind, id, active: false, pointerY: e.clientY, indicator: null };
     startPosRef.current = { x: e.clientX, y: e.clientY };
     pointerIdRef.current = e.pointerId;
@@ -970,13 +969,12 @@ export default function App() {
       <div
         key={taskId}
         ref={el => dnd.registerRow(rowKey, el, meta)}
-        onPointerDown={dnd.startDrag("task", taskId, "touch-longpress")}
         onPointerMove={dnd.onPointerMove}
         onPointerUp={dnd.onPointerUp}
         onPointerCancel={dnd.onPointerCancel}
         style={{
           display: "grid",
-          gridTemplateColumns: wide ? `16px ${theme.gridCols}` : theme.gridCols,
+          gridTemplateColumns: `32px ${theme.gridCols}`,
           padding: theme.rowPad,
           gap: 2, alignItems: "center", borderTop: "1px solid #f0f0f0",
           touchAction: isDragging ? "none" : "pan-y",
@@ -1002,18 +1000,17 @@ export default function App() {
             background: "#000", pointerEvents: "none", zIndex: 5,
           }} />
         )}
-        {wide && (
-          <div
-            onPointerDown={dnd.startDrag("task", taskId, "immediate")}
-            onClick={e => e.stopPropagation()}
-            style={{
-              cursor: "grab", color: "#bbb", fontSize: 12, lineHeight: 1,
-              userSelect: "none", padding: "6px 2px", textAlign: "center",
-              touchAction: "none",
-            }}
-            aria-hidden="true"
-          >⋮⋮</div>
-        )}
+        <div
+          onPointerDown={dnd.startDrag("task", taskId)}
+          onClick={e => e.stopPropagation()}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "center",
+            cursor: "grab", color: "#999", fontSize: 14, lineHeight: 1,
+            userSelect: "none", height: theme.rowHeight, width: 32,
+            touchAction: "none",
+          }}
+          aria-label="Drag handle"
+        >⋮⋮</div>
         <div
           onClick={(e) => { if (dnd.isJustDropped()) { e.preventDefault(); return; } startEditTask(taskId); }}
           style={{
@@ -1133,13 +1130,12 @@ export default function App() {
       <div
         key={`g-${entry.id}`}
         ref={el => dnd.registerRow(rowKey, el, meta)}
-        onPointerDown={dnd.startDrag("group", entry.id)}
         onPointerMove={dnd.onPointerMove}
         onPointerUp={dnd.onPointerUp}
         onPointerCancel={dnd.onPointerCancel}
         style={{
           display: "flex", alignItems: "center",
-          padding: `10px ${wide ? 24 : 16}px`,
+          padding: `10px ${wide ? 24 : 16}px 10px ${(wide ? 24 : 16) - 4}px`,
           borderTop: "1px solid #f0f0f0",
           background: isIntoTarget ? "rgba(0,0,0,0.04)" : "#fafafa",
           gap: 8,
@@ -1164,6 +1160,17 @@ export default function App() {
             background: "#000", pointerEvents: "none", zIndex: 5,
           }} />
         )}
+        <div
+          onPointerDown={dnd.startDrag("group", entry.id)}
+          onClick={e => e.stopPropagation()}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "center",
+            cursor: "grab", color: "#999", fontSize: 14, lineHeight: 1,
+            userSelect: "none", width: 32, minHeight: 40,
+            touchAction: "none",
+          }}
+          aria-label="Drag handle"
+        >⋮⋮</div>
         <button
           onPointerDown={e => e.stopPropagation()}
           onClick={(e) => { if (dnd.isJustDropped()) { e.preventDefault(); return; } toggleGroupCollapsed(entry.id); }}
@@ -1281,11 +1288,11 @@ export default function App() {
         {/* Day header row */}
         <div style={{
           display: "grid",
-          gridTemplateColumns: wide ? `16px ${theme.gridCols}` : theme.gridCols,
+          gridTemplateColumns: `32px ${theme.gridCols}`,
           padding: theme.rowPad,
           gap: 2, marginBottom: 2, alignItems: "center",
         }}>
-          {wide && <div />}
+          <div />
           <div />
           {DAYS.map((d, di) => (
             <div key={di} style={{
