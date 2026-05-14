@@ -271,7 +271,63 @@ function useDragAndDrop({ onDrop, resolveTarget }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { dragState, startDrag, onPointerMove, onPointerUp, onPointerCancel, registerRow, isJustDropped };
+  const getRowRect = (key) => {
+    const entry = rowsRef.current.get(key);
+    if (!entry?.el) return null;
+    const r = entry.el.getBoundingClientRect();
+    return { top: r.top, height: r.height };
+  };
+
+  return { dragState, startDrag, onPointerMove, onPointerUp, onPointerCancel, registerRow, isJustDropped, getRowRect };
+}
+
+function renderKeysFromState(state) {
+  const keys = [];
+  for (const entry of state.order) {
+    if (entry.kind === "group") {
+      keys.push(`g-${entry.id}`);
+      const g = state.groups[entry.id];
+      if (g && !g.collapsed) {
+        for (const tid of entry.taskIds) keys.push(`t-${tid}`);
+      }
+    } else {
+      keys.push(`t-${entry.id}`);
+    }
+  }
+  return keys;
+}
+
+function computeShiftMap(state, dragState, getRowRect, applyMove) {
+  if (!dragState || !dragState.active || !dragState.indicator) return null;
+  const next = applyMove(state, { kind: dragState.kind, id: dragState.id, target: dragState.indicator });
+  if (next === state) return null;
+  const currentKeys = renderKeysFromState(state);
+  const newKeys = renderKeysFromState(next);
+  const rects = new Map();
+  for (const k of currentKeys) {
+    const r = getRowRect(k);
+    if (r) rects.set(k, r);
+  }
+  if (currentKeys.length === 0) return null;
+  const firstTop = rects.get(currentKeys[0])?.top ?? 0;
+  let cursor = firstTop;
+  const newTop = new Map();
+  for (const k of newKeys) {
+    newTop.set(k, cursor);
+    cursor += rects.get(k)?.height ?? 50;
+  }
+  const shifts = new Map();
+  const draggedKey = dragState.kind === "task" ? `t-${dragState.id}` : `g-${dragState.id}`;
+  for (const k of currentKeys) {
+    if (k === draggedKey) continue;
+    const oldTop = rects.get(k)?.top;
+    const ny = newTop.get(k);
+    if (oldTop != null && ny != null) {
+      const delta = ny - oldTop;
+      if (delta !== 0) shifts.set(k, delta);
+    }
+  }
+  return shifts.size > 0 ? shifts : null;
 }
 
 async function fetchRemote(pin) {
@@ -759,6 +815,8 @@ export default function App() {
     },
   });
 
+  const shiftMap = computeShiftMap(state, dnd.dragState, dnd.getRowRect, applyMove);
+
   const moveGroup = (groupId, dir) => {
     setState(prev => {
       const idx = prev.order.findIndex(e => e.kind === "group" && e.id === groupId);
@@ -984,8 +1042,10 @@ export default function App() {
           opacity: isDragging ? 0.55 : 1,
           background: isDragging ? "#fff" : undefined,
           boxShadow: isDragging ? "0 8px 24px rgba(0,0,0,0.18)" : undefined,
-          transform: isDragging ? `scale(1.01) translateY(${dragDeltaY}px)` : undefined,
-          transition: isDragging ? "none" : undefined,
+          transform: isDragging
+            ? `scale(1.01) translateY(${dragDeltaY}px)`
+            : (shiftMap?.get(rowKey) ? `translateY(${shiftMap.get(rowKey)}px)` : undefined),
+          transition: isDragging ? "none" : (dnd.dragState?.active ? "transform 0.18s ease-out" : undefined),
         }}
       >
         {showLineAbove && (
@@ -1145,7 +1205,10 @@ export default function App() {
           zIndex: isDragging ? 10 : "auto",
           opacity: isDragging ? 0.55 : 1,
           boxShadow: isDragging ? "0 8px 24px rgba(0,0,0,0.18)" : undefined,
-          transform: isDragging ? `scale(1.01) translateY(${dragDeltaY}px)` : undefined,
+          transform: isDragging
+            ? `scale(1.01) translateY(${dragDeltaY}px)`
+            : (shiftMap?.get(rowKey) ? `translateY(${shiftMap.get(rowKey)}px)` : undefined),
+          transition: isDragging ? "none" : (dnd.dragState?.active ? "transform 0.18s ease-out" : undefined),
         }}
       >
         {showLineAbove && (
