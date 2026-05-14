@@ -24,12 +24,71 @@ function formatWeekLabel(weekKey) {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function newId() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return "id_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function migrate(raw) {
+  if (!raw) return null;
+  if (raw.schemaVersion === 2) {
+    return {
+      schemaVersion: 2,
+      tasks: raw.tasks || {},
+      groups: raw.groups || {},
+      order: raw.order || [],
+      checksByWeek: raw.checksByWeek || {},
+      version: raw.version || 0,
+    };
+  }
+  const oldTasks = Array.isArray(raw.tasks) ? raw.tasks : [];
+  const ids = oldTasks.map(() => newId());
+  const tasks = {};
+  oldTasks.forEach((name, i) => { tasks[ids[i]] = { name }; });
+  const order = ids.map(id => ({ kind: "task", id }));
+  const checksByWeek = {};
+  for (const [wk, wkChecks] of Object.entries(raw.checksByWeek || {})) {
+    const next = {};
+    for (const [k, v] of Object.entries(wkChecks)) {
+      const [tiStr, di] = k.split("_");
+      const ti = parseInt(tiStr, 10);
+      if (Number.isFinite(ti) && ti >= 0 && ti < ids.length) {
+        next[`${ids[ti]}_${di}`] = v;
+      }
+    }
+    checksByWeek[wk] = next;
+  }
+  return {
+    schemaVersion: 2,
+    tasks,
+    groups: {},
+    order,
+    checksByWeek,
+    version: raw.version || 0,
+  };
+}
+
+function defaultState() {
+  const ids = DEFAULT_TASKS.map(() => newId());
+  const tasks = {};
+  DEFAULT_TASKS.forEach((name, i) => { tasks[ids[i]] = { name }; });
+  return {
+    schemaVersion: 2,
+    tasks,
+    groups: {},
+    order: ids.map(id => ({ kind: "task", id })),
+    checksByWeek: {},
+    version: 0,
+  };
+}
+
 function loadLocalState() {
   try {
     const cached = localStorage.getItem(STATE_KEY);
     if (cached) {
       const parsed = JSON.parse(cached);
-      return { version: 0, ...parsed };
+      const migrated = migrate(parsed);
+      if (migrated) return migrated;
     }
   } catch {}
   try {
@@ -43,10 +102,11 @@ function loadLocalState() {
           catch {}
         }
       }
-      return { tasks: oldTasks, checksByWeek, version: 0 };
+      const migrated = migrate({ tasks: oldTasks, checksByWeek, version: 0 });
+      if (migrated) return migrated;
     }
   } catch {}
-  return { tasks: DEFAULT_TASKS, checksByWeek: {}, version: 0 };
+  return defaultState();
 }
 
 function saveLocalState(state) {
@@ -93,6 +153,10 @@ const btnBase = {
 const btnPrimary = { ...btnBase, background: "#000", color: "#fff" };
 const btnGhost = { ...btnBase, background: "transparent", color: "#666", border: "1px solid #e0e0e0" };
 const btnDanger = { ...btnBase, background: "transparent", color: "#c33", border: "1px solid #f0d0d0" };
+const btnIcon = {
+  ...btnBase, padding: "8px 12px", fontSize: 15, minWidth: 40, minHeight: 40,
+  background: "transparent", color: "#666", border: "1px solid #e0e0e0",
+};
 
 const STATUS_LABEL = {
   local: "Local only",
@@ -142,14 +206,19 @@ export default function App() {
   const stateRef = useRef(null);
   const pinRef = useRef(pin);
 
-  const [editingIdx, setEditingIdx] = useState(null);
+  const [editingTaskId, setEditingTaskId] = useState(null);
   const [editVal, setEditVal] = useState("");
+  const [editingGroupId, setEditingGroupId] = useState(null);
+  const [editGroupVal, setEditGroupVal] = useState("");
   const [newTask, setNewTask] = useState("");
   const [showAdd, setShowAdd] = useState(false);
+  const [newGroup, setNewGroup] = useState("");
+  const [showAddGroup, setShowAddGroup] = useState(false);
   const editRef = useRef();
+  const editGroupRef = useRef();
   const newRef = useRef();
+  const newGroupRef = useRef();
 
-  const tasks = state.tasks;
   const checks = state.checksByWeek[weekKey] || {};
   const todayCol = ((new Date().getDay() + 6) % 7);
 
@@ -163,11 +232,12 @@ export default function App() {
     setSyncStatus("syncing");
     fetchRemote(pin).then(server => {
       if (cancelled) return;
-      const serverVersion = server?.version || 0;
+      const migrated = migrate(server);
+      const serverVersion = migrated?.version || 0;
       const localVersion = state.version || 0;
-      if (server && server.tasks && serverVersion > localVersion) {
-        setState(server);
-      } else if (!server || !server.tasks || localVersion > serverVersion) {
+      if (migrated && serverVersion > localVersion) {
+        setState(migrated);
+      } else if (!migrated || localVersion > serverVersion) {
         pushRemote(pin, state).catch(() => {});
       }
       setSyncStatus("synced");
@@ -231,62 +301,255 @@ export default function App() {
     };
   }, []);
 
-  const updateTasks = (fn) => setState(prev => ({
-    ...prev,
-    tasks: fn(prev.tasks),
-    version: (prev.version || 0) + 1,
-  }));
+  const bump = (prev) => (prev.version || 0) + 1;
+
   const updateChecks = (fn) => setState(prev => ({
     ...prev,
     checksByWeek: { ...prev.checksByWeek, [weekKey]: fn(prev.checksByWeek[weekKey] || {}) },
-    version: (prev.version || 0) + 1,
+    version: bump(prev),
   }));
 
-  const toggle = (ti, di) =>
-    updateChecks(prev => ({ ...prev, [`${ti}_${di}`]: !prev[`${ti}_${di}`] }));
+  const toggle = (taskId, di) =>
+    updateChecks(prev => ({ ...prev, [`${taskId}_${di}`]: !prev[`${taskId}_${di}`] }));
 
-  const startEdit = (i) => {
-    setEditingIdx(i);
-    setEditVal(tasks[i]);
+  const addTask = (name, groupId) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const id = newId();
+    setState(prev => {
+      const tasks = { ...prev.tasks, [id]: { name: trimmed } };
+      let order = prev.order;
+      if (groupId && prev.groups[groupId]) {
+        order = prev.order.map(e =>
+          e.kind === "group" && e.id === groupId
+            ? { ...e, taskIds: [...e.taskIds, id] }
+            : e
+        );
+      } else {
+        order = [...prev.order, { kind: "task", id }];
+      }
+      return { ...prev, tasks, order, version: bump(prev) };
+    });
+  };
+
+  const renameTask = (id, name) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setState(prev => ({
+      ...prev,
+      tasks: { ...prev.tasks, [id]: { ...prev.tasks[id], name: trimmed } },
+      version: bump(prev),
+    }));
+  };
+
+  const deleteTask = (id) => {
+    setState(prev => {
+      const tasks = { ...prev.tasks };
+      delete tasks[id];
+      const order = prev.order
+        .map(e => e.kind === "group" ? { ...e, taskIds: e.taskIds.filter(t => t !== id) } : e)
+        .filter(e => !(e.kind === "task" && e.id === id));
+      const checksByWeek = {};
+      const prefix = `${id}_`;
+      for (const [wk, wkChecks] of Object.entries(prev.checksByWeek)) {
+        const next = {};
+        for (const [k, v] of Object.entries(wkChecks)) {
+          if (!k.startsWith(prefix)) next[k] = v;
+        }
+        checksByWeek[wk] = next;
+      }
+      return { ...prev, tasks, order, checksByWeek, version: bump(prev) };
+    });
+    setEditingTaskId(null);
+  };
+
+  // Walk `order` to find the position of a task: returns
+  //   { container: "top", topIdx }                       // top-level task at order[topIdx]
+  //   { container: "group", groupId, topIdx, childIdx }  // task inside group at order[topIdx]
+  const locateTask = (order, taskId) => {
+    for (let i = 0; i < order.length; i++) {
+      const e = order[i];
+      if (e.kind === "task" && e.id === taskId) return { container: "top", topIdx: i };
+      if (e.kind === "group") {
+        const childIdx = e.taskIds.indexOf(taskId);
+        if (childIdx !== -1) return { container: "group", groupId: e.id, topIdx: i, childIdx };
+      }
+    }
+    return null;
+  };
+
+  const moveTask = (taskId, dir) => {
+    setState(prev => {
+      const order = prev.order.map(e => e.kind === "group" ? { ...e, taskIds: [...e.taskIds] } : e);
+      const loc = locateTask(order, taskId);
+      if (!loc) return prev;
+
+      if (loc.container === "top") {
+        if (dir === -1) {
+          if (loc.topIdx === 0) return prev;
+          const above = order[loc.topIdx - 1];
+          if (above.kind === "group") {
+            // drop into the group as last child
+            order.splice(loc.topIdx, 1);
+            above.taskIds.push(taskId);
+          } else {
+            // swap with task above
+            [order[loc.topIdx - 1], order[loc.topIdx]] = [order[loc.topIdx], order[loc.topIdx - 1]];
+          }
+        } else {
+          if (loc.topIdx === order.length - 1) return prev;
+          const below = order[loc.topIdx + 1];
+          if (below.kind === "group") {
+            // drop into the group as first child
+            order.splice(loc.topIdx, 1);
+            below.taskIds.unshift(taskId);
+          } else {
+            [order[loc.topIdx], order[loc.topIdx + 1]] = [order[loc.topIdx + 1], order[loc.topIdx]];
+          }
+        }
+      } else {
+        const groupEntry = order[loc.topIdx];
+        if (dir === -1) {
+          if (loc.childIdx === 0) {
+            // lift out above the group
+            groupEntry.taskIds.splice(0, 1);
+            order.splice(loc.topIdx, 0, { kind: "task", id: taskId });
+          } else {
+            const arr = groupEntry.taskIds;
+            [arr[loc.childIdx - 1], arr[loc.childIdx]] = [arr[loc.childIdx], arr[loc.childIdx - 1]];
+          }
+        } else {
+          if (loc.childIdx === groupEntry.taskIds.length - 1) {
+            // drop out below the group
+            groupEntry.taskIds.splice(loc.childIdx, 1);
+            order.splice(loc.topIdx + 1, 0, { kind: "task", id: taskId });
+          } else {
+            const arr = groupEntry.taskIds;
+            [arr[loc.childIdx], arr[loc.childIdx + 1]] = [arr[loc.childIdx + 1], arr[loc.childIdx]];
+          }
+        }
+      }
+      return { ...prev, order, version: bump(prev) };
+    });
+  };
+
+  const moveTaskToGroup = (taskId, groupId) => {
+    setState(prev => {
+      const loc = locateTask(prev.order, taskId);
+      if (!loc) return prev;
+      const currentGroup = loc.container === "group" ? loc.groupId : null;
+      if (currentGroup === groupId) return prev;
+
+      let order = prev.order
+        .map(e => e.kind === "group" ? { ...e, taskIds: e.taskIds.filter(t => t !== taskId) } : e)
+        .filter(e => !(e.kind === "task" && e.id === taskId));
+
+      if (groupId && prev.groups[groupId]) {
+        order = order.map(e =>
+          e.kind === "group" && e.id === groupId
+            ? { ...e, taskIds: [...e.taskIds, taskId] }
+            : e
+        );
+      } else {
+        order = [...order, { kind: "task", id: taskId }];
+      }
+      return { ...prev, order, version: bump(prev) };
+    });
+  };
+
+  const addGroup = (name) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const id = newId();
+    setState(prev => ({
+      ...prev,
+      groups: { ...prev.groups, [id]: { name: trimmed, collapsed: false } },
+      order: [...prev.order, { kind: "group", id, taskIds: [] }],
+      version: bump(prev),
+    }));
+  };
+
+  const renameGroup = (id, name) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setState(prev => ({
+      ...prev,
+      groups: { ...prev.groups, [id]: { ...prev.groups[id], name: trimmed } },
+      version: bump(prev),
+    }));
+  };
+
+  const toggleGroupCollapsed = (id) => {
+    setState(prev => ({
+      ...prev,
+      groups: { ...prev.groups, [id]: { ...prev.groups[id], collapsed: !prev.groups[id].collapsed } },
+      version: bump(prev),
+    }));
+  };
+
+  const deleteGroup = (id) => {
+    setState(prev => {
+      const groups = { ...prev.groups };
+      delete groups[id];
+      const order = [];
+      for (const e of prev.order) {
+        if (e.kind === "group" && e.id === id) {
+          for (const tid of e.taskIds) order.push({ kind: "task", id: tid });
+        } else {
+          order.push(e);
+        }
+      }
+      return { ...prev, groups, order, version: bump(prev) };
+    });
+    setEditingGroupId(null);
+  };
+
+  const startEditTask = (id) => {
+    setEditingTaskId(id);
+    setEditVal(state.tasks[id]?.name || "");
     setTimeout(() => editRef.current?.focus(), 30);
   };
 
-  const saveEdit = () => {
-    if (editVal.trim())
-      updateTasks(prev => prev.map((t, i) => i === editingIdx ? editVal.trim() : t));
-    setEditingIdx(null);
+  const saveEditTask = () => {
+    if (editVal.trim() && editingTaskId) renameTask(editingTaskId, editVal);
+    setEditingTaskId(null);
   };
 
-  const deleteTask = (i) => {
-    setState(prev => {
-      const newTasks = prev.tasks.filter((_, idx) => idx !== i);
-      const newChecksByWeek = {};
-      for (const [wk, wkChecks] of Object.entries(prev.checksByWeek)) {
-        const shifted = {};
-        for (const [k, v] of Object.entries(wkChecks)) {
-          const [ti, di] = k.split("_");
-          const tiNum = parseInt(ti);
-          if (tiNum < i) shifted[k] = v;
-          else if (tiNum > i) shifted[`${tiNum - 1}_${di}`] = v;
-        }
-        newChecksByWeek[wk] = shifted;
-      }
-      return { tasks: newTasks, checksByWeek: newChecksByWeek, version: (prev.version || 0) + 1 };
-    });
-    setEditingIdx(null);
+  const startEditGroup = (id) => {
+    setEditingGroupId(id);
+    setEditGroupVal(state.groups[id]?.name || "");
+    setTimeout(() => editGroupRef.current?.focus(), 30);
   };
 
-  const addTask = () => {
-    if (newTask.trim()) {
-      updateTasks(prev => [...prev, newTask.trim()]);
-      setNewTask("");
-      setShowAdd(false);
-    }
+  const saveEditGroup = () => {
+    if (editGroupVal.trim() && editingGroupId) renameGroup(editingGroupId, editGroupVal);
+    setEditingGroupId(null);
   };
 
   const startAdd = () => {
     setShowAdd(true);
     setTimeout(() => newRef.current?.focus(), 30);
+  };
+
+  const startAddGroup = () => {
+    setShowAddGroup(true);
+    setTimeout(() => newGroupRef.current?.focus(), 30);
+  };
+
+  const submitAddTask = () => {
+    if (newTask.trim()) {
+      addTask(newTask, null);
+      setNewTask("");
+      setShowAdd(false);
+    }
+  };
+
+  const submitAddGroup = () => {
+    if (newGroup.trim()) {
+      addGroup(newGroup);
+      setNewGroup("");
+      setShowAddGroup(false);
+    }
   };
 
   const savePin = (p) => {
@@ -300,10 +563,217 @@ export default function App() {
     setPinModal(false);
   };
 
-  const weekDone = tasks.reduce((acc, _, ti) =>
-    acc + DAYS.filter((_, di) => checks[`${ti}_${di}`]).length, 0);
-  const weekTotal = tasks.length * 7;
+  const allTaskIds = Object.keys(state.tasks);
+  const weekDone = allTaskIds.reduce((acc, tid) =>
+    acc + DAYS.filter((_, di) => checks[`${tid}_${di}`]).length, 0);
+  const weekTotal = allTaskIds.length * 7;
   const pct = weekTotal ? Math.round((weekDone / weekTotal) * 100) : 0;
+
+  const groupList = state.order.filter(e => e.kind === "group");
+  const groupOptions = groupList.map(e => ({ id: e.id, name: state.groups[e.id]?.name || "(untitled)" }));
+
+  const renderTaskRow = (taskId, opts) => {
+    const task = state.tasks[taskId];
+    if (!task) return null;
+    const indented = !!opts?.indented;
+    const canMoveUp = opts?.canMoveUp !== false;
+    const canMoveDown = opts?.canMoveDown !== false;
+    const currentGroupId = opts?.currentGroupId || "";
+
+    if (editingTaskId === taskId) {
+      return (
+        <div key={taskId} style={{
+          padding: `10px ${wide ? 24 : 16}px`, borderTop: "1px solid #f0f0f0",
+          display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap",
+        }}>
+          <input
+            ref={editRef}
+            value={editVal}
+            onChange={e => setEditVal(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === "Enter") saveEditTask();
+              if (e.key === "Escape") setEditingTaskId(null);
+            }}
+            style={{
+              flex: "1 1 160px", minWidth: 0, fontSize: 15, padding: "8px 10px",
+              border: "1px solid #ddd", borderRadius: 8, outline: "none",
+            }}
+          />
+          <button
+            onClick={() => moveTask(taskId, -1)}
+            disabled={!canMoveUp}
+            style={{ ...btnIcon, opacity: canMoveUp ? 1 : 0.35, cursor: canMoveUp ? "pointer" : "default" }}
+            aria-label="Move up"
+          >↑</button>
+          <button
+            onClick={() => moveTask(taskId, +1)}
+            disabled={!canMoveDown}
+            style={{ ...btnIcon, opacity: canMoveDown ? 1 : 0.35, cursor: canMoveDown ? "pointer" : "default" }}
+            aria-label="Move down"
+          >↓</button>
+          <select
+            value={currentGroupId}
+            onChange={e => moveTaskToGroup(taskId, e.target.value || null)}
+            style={{
+              fontSize: 13, padding: "6px 8px", border: "1px solid #e0e0e0",
+              borderRadius: 8, background: "#fff", color: "#444", fontFamily: FONT,
+            }}
+          >
+            <option value="">(no group)</option>
+            {groupOptions.map(g => (
+              <option key={g.id} value={g.id}>{g.name}</option>
+            ))}
+          </select>
+          <button onClick={saveEditTask} style={btnPrimary}>Save</button>
+          <button onClick={() => deleteTask(taskId)} style={btnDanger}>Delete</button>
+        </div>
+      );
+    }
+
+    return (
+      <div key={taskId} style={{
+        display: "grid", gridTemplateColumns: theme.gridCols, padding: theme.rowPad,
+        gap: 2, alignItems: "center", borderTop: "1px solid #f0f0f0",
+      }}>
+        <div
+          onClick={() => startEditTask(taskId)}
+          style={{
+            fontSize: 15, color: "#111", padding: "12px 8px 12px 0",
+            paddingLeft: indented ? 20 : 0,
+            cursor: "pointer", userSelect: "none",
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }}
+        >{task.name}</div>
+        {DAYS.map((_, di) => {
+          const on = !!checks[`${taskId}_${di}`];
+          const today = di === todayCol;
+          return (
+            <div
+              key={di}
+              onClick={() => toggle(taskId, di)}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                height: theme.rowHeight, cursor: "pointer",
+                background: today ? "#fafafa" : "transparent",
+              }}
+            >
+              <div style={{
+                width: theme.checkSize, height: theme.checkSize, borderRadius: "50%",
+                border: on ? "none" : `${theme.checkBorder}px solid #d0d0d0`,
+                background: on ? "#000" : "transparent",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                transition: "background .15s, border-color .15s",
+              }}>
+                {on && (
+                  <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+                    <path d="M2 5.5L4.5 8L9 3" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderGroupHeader = (entry) => {
+    const group = state.groups[entry.id];
+    if (!group) return null;
+    const childCount = entry.taskIds.length;
+    const groupDone = entry.taskIds.reduce((acc, tid) =>
+      acc + DAYS.filter((_, di) => checks[`${tid}_${di}`]).length, 0);
+    const groupTotal = childCount * 7;
+
+    if (editingGroupId === entry.id) {
+      return (
+        <div key={`g-${entry.id}`} style={{
+          padding: `10px ${wide ? 24 : 16}px`, borderTop: "1px solid #f0f0f0",
+          background: "#fafafa",
+          display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap",
+        }}>
+          <input
+            ref={editGroupRef}
+            value={editGroupVal}
+            onChange={e => setEditGroupVal(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === "Enter") saveEditGroup();
+              if (e.key === "Escape") setEditingGroupId(null);
+            }}
+            style={{
+              flex: "1 1 160px", minWidth: 0, fontSize: 15, padding: "8px 10px",
+              border: "1px solid #ddd", borderRadius: 8, outline: "none",
+            }}
+          />
+          <button onClick={saveEditGroup} style={btnPrimary}>Save</button>
+          <button onClick={() => deleteGroup(entry.id)} style={btnDanger}>Delete</button>
+        </div>
+      );
+    }
+
+    return (
+      <div key={`g-${entry.id}`} style={{
+        display: "flex", alignItems: "center",
+        padding: `10px ${wide ? 24 : 16}px`,
+        borderTop: "1px solid #f0f0f0",
+        background: "#fafafa",
+        gap: 8,
+      }}>
+        <button
+          onClick={() => toggleGroupCollapsed(entry.id)}
+          style={{
+            background: "transparent", border: "none", cursor: "pointer",
+            fontSize: 16, color: "#555", padding: "8px 10px", fontFamily: FONT,
+            minWidth: 40, minHeight: 40, textAlign: "center",
+          }}
+          aria-label={group.collapsed ? "Expand" : "Collapse"}
+        >{group.collapsed ? "▸" : "▾"}</button>
+        <div
+          onClick={() => startEditGroup(entry.id)}
+          style={{
+            flex: 1, fontSize: 14, fontWeight: 600, color: "#333",
+            cursor: "pointer", userSelect: "none",
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            letterSpacing: 0.2, textTransform: "uppercase",
+          }}
+        >{group.name}</div>
+        {childCount > 0 && (
+          <div style={{ fontSize: 12, color: "#888", fontVariantNumeric: "tabular-nums" }}>
+            {groupDone}/{groupTotal}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderItems = [];
+  state.order.forEach((entry, idx) => {
+    if (entry.kind === "task") {
+      renderItems.push(renderTaskRow(entry.id, {
+        indented: false,
+        canMoveUp: idx > 0,
+        canMoveDown: idx < state.order.length - 1,
+        currentGroupId: "",
+      }));
+    } else if (entry.kind === "group") {
+      renderItems.push(renderGroupHeader(entry));
+      const group = state.groups[entry.id];
+      if (group && !group.collapsed) {
+        entry.taskIds.forEach((tid, ci) => {
+          const isFirstChild = ci === 0;
+          const isLastChild = ci === entry.taskIds.length - 1;
+          const groupIsFirst = idx === 0;
+          const groupIsLast = idx === state.order.length - 1;
+          renderItems.push(renderTaskRow(tid, {
+            indented: true,
+            canMoveUp: !(isFirstChild && groupIsFirst),
+            canMoveDown: !(isLastChild && groupIsLast),
+            currentGroupId: entry.id,
+          }));
+        });
+      }
+    }
+  });
 
   return (
     <div style={{
@@ -359,79 +829,13 @@ export default function App() {
           ))}
         </div>
 
-        {/* Tasks */}
+        {/* Tasks + groups */}
         <div style={{ flex: 1 }}>
-          {tasks.map((task, ti) => (
-            editingIdx === ti ? (
-              <div key={ti} style={{
-                padding: `10px ${wide ? 24 : 16}px`, borderTop: "1px solid #f0f0f0",
-                display: "flex", gap: 8, alignItems: "center",
-              }}>
-                <input
-                  ref={editRef}
-                  value={editVal}
-                  onChange={e => setEditVal(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === "Enter") saveEdit();
-                    if (e.key === "Escape") setEditingIdx(null);
-                  }}
-                  style={{
-                    flex: 1, minWidth: 0, fontSize: 15, padding: "8px 10px",
-                    border: "1px solid #ddd", borderRadius: 8, outline: "none",
-                  }}
-                />
-                <button onClick={saveEdit} style={btnPrimary}>Save</button>
-                <button onClick={() => deleteTask(ti)} style={btnDanger}>Delete</button>
-              </div>
-            ) : (
-              <div key={ti} style={{
-                display: "grid", gridTemplateColumns: theme.gridCols, padding: theme.rowPad,
-                gap: 2, alignItems: "center", borderTop: "1px solid #f0f0f0",
-              }}>
-                <div
-                  onClick={() => startEdit(ti)}
-                  style={{
-                    fontSize: 15, color: "#111", padding: "12px 8px 12px 0",
-                    cursor: "pointer", userSelect: "none",
-                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                  }}
-                >{task}</div>
-                {DAYS.map((_, di) => {
-                  const on = !!checks[`${ti}_${di}`];
-                  const today = di === todayCol;
-                  return (
-                    <div
-                      key={di}
-                      onClick={() => toggle(ti, di)}
-                      style={{
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                        height: theme.rowHeight, cursor: "pointer",
-                        background: today ? "#fafafa" : "transparent",
-                      }}
-                    >
-                      <div style={{
-                        width: theme.checkSize, height: theme.checkSize, borderRadius: "50%",
-                        border: on ? "none" : `${theme.checkBorder}px solid #d0d0d0`,
-                        background: on ? "#000" : "transparent",
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                        transition: "background .15s, border-color .15s",
-                      }}>
-                        {on && (
-                          <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
-                            <path d="M2 5.5L4.5 8L9 3" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )
-          ))}
+          {renderItems}
         </div>
 
-        {/* Add task */}
-        <div style={{ borderTop: "1px solid #f0f0f0", padding: `10px ${wide ? 24 : 16}px 16px` }}>
+        {/* Add controls */}
+        <div style={{ borderTop: "1px solid #f0f0f0", padding: `10px ${wide ? 24 : 16}px 16px`, display: "flex", flexDirection: "column", gap: 8 }}>
           {showAdd ? (
             <div style={{ display: "flex", gap: 8 }}>
               <input
@@ -440,7 +844,7 @@ export default function App() {
                 onChange={e => setNewTask(e.target.value)}
                 placeholder="New task"
                 onKeyDown={e => {
-                  if (e.key === "Enter") addTask();
+                  if (e.key === "Enter") submitAddTask();
                   if (e.key === "Escape") { setShowAdd(false); setNewTask(""); }
                 }}
                 style={{
@@ -448,7 +852,7 @@ export default function App() {
                   border: "1px solid #ddd", borderRadius: 8, outline: "none",
                 }}
               />
-              <button onClick={addTask} style={btnPrimary}>Add</button>
+              <button onClick={submitAddTask} style={btnPrimary}>Add</button>
               <button onClick={() => { setShowAdd(false); setNewTask(""); }} style={btnGhost}>Cancel</button>
             </div>
           ) : (
@@ -457,6 +861,32 @@ export default function App() {
               background: "transparent", border: "1px dashed #ddd", borderRadius: 10,
               cursor: "pointer", fontFamily: FONT,
             }}>+ Add task</button>
+          )}
+          {showAddGroup ? (
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                ref={newGroupRef}
+                value={newGroup}
+                onChange={e => setNewGroup(e.target.value)}
+                placeholder="New group"
+                onKeyDown={e => {
+                  if (e.key === "Enter") submitAddGroup();
+                  if (e.key === "Escape") { setShowAddGroup(false); setNewGroup(""); }
+                }}
+                style={{
+                  flex: 1, minWidth: 0, fontSize: 15, padding: "10px 12px",
+                  border: "1px solid #ddd", borderRadius: 8, outline: "none",
+                }}
+              />
+              <button onClick={submitAddGroup} style={btnPrimary}>Add</button>
+              <button onClick={() => { setShowAddGroup(false); setNewGroup(""); }} style={btnGhost}>Cancel</button>
+            </div>
+          ) : (
+            <button onClick={startAddGroup} style={{
+              width: "100%", padding: "12px", fontSize: 14, color: "#666",
+              background: "transparent", border: "1px dashed #ddd", borderRadius: 10,
+              cursor: "pointer", fontFamily: FONT,
+            }}>+ Add group</button>
           )}
         </div>
       </div>
