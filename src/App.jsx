@@ -127,6 +127,154 @@ function useMediaQuery(query) {
   return matches;
 }
 
+// Hand-rolled drag-and-drop with Pointer Events. Touch uses long-press to pick up;
+// mouse picks up immediately from the desktop grip. Body `touch-action: none` is
+// the only reliable way to suppress scroll inside an installed PWA on iOS Safari.
+function useDragAndDrop({ onDrop, resolveTarget }) {
+  const [dragState, setDragState] = useState(null);
+  const dragRef = useRef(null);
+  const rowsRef = useRef(new Map());
+  const longPressTimerRef = useRef(null);
+  const justDroppedRef = useRef(0);
+  const startPosRef = useRef(null);
+  const autoscrollRafRef = useRef(0);
+  const autoscrollDirRef = useRef(0);
+  const pointerIdRef = useRef(null);
+  const capturedElRef = useRef(null);
+  const prevBodyTouchActionRef = useRef("");
+
+  const registerRow = (key, el, meta) => {
+    if (el) rowsRef.current.set(key, { el, meta });
+    else rowsRef.current.delete(key);
+  };
+
+  const isJustDropped = () => Date.now() - justDroppedRef.current < 300;
+
+  const stopAutoscroll = () => {
+    if (autoscrollRafRef.current) {
+      cancelAnimationFrame(autoscrollRafRef.current);
+      autoscrollRafRef.current = 0;
+    }
+    autoscrollDirRef.current = 0;
+  };
+
+  const startAutoscroll = (dir) => {
+    if (autoscrollDirRef.current === dir) return;
+    autoscrollDirRef.current = dir;
+    if (autoscrollRafRef.current) cancelAnimationFrame(autoscrollRafRef.current);
+    const tick = () => {
+      if (autoscrollDirRef.current === 0) return;
+      window.scrollBy(0, autoscrollDirRef.current * 8);
+      autoscrollRafRef.current = requestAnimationFrame(tick);
+    };
+    autoscrollRafRef.current = requestAnimationFrame(tick);
+  };
+
+  const cleanup = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    stopAutoscroll();
+    if (capturedElRef.current && pointerIdRef.current != null) {
+      try { capturedElRef.current.releasePointerCapture(pointerIdRef.current); } catch {}
+    }
+    capturedElRef.current = null;
+    pointerIdRef.current = null;
+    if (dragRef.current?.active) {
+      document.body.style.touchAction = prevBodyTouchActionRef.current;
+    }
+    dragRef.current = null;
+    setDragState(null);
+    startPosRef.current = null;
+  };
+
+  const beginActive = (clientY) => {
+    if (!dragRef.current) return;
+    dragRef.current.active = true;
+    dragRef.current.startY = clientY;
+    dragRef.current.pointerY = clientY;
+    prevBodyTouchActionRef.current = document.body.style.touchAction;
+    document.body.style.touchAction = "none";
+    if (navigator.vibrate) { try { navigator.vibrate(10); } catch {} }
+    dragRef.current.indicator = resolveTarget(dragRef.current.kind, dragRef.current.id, clientY, rowsRef.current);
+    setDragState({ ...dragRef.current });
+  };
+
+  const onPointerMove = (e) => {
+    if (!dragRef.current) return;
+    if (e.pointerId !== pointerIdRef.current) return;
+    const clientY = e.clientY;
+    if (!dragRef.current.active) {
+      const dx = e.clientX - startPosRef.current.x;
+      const dy = clientY - startPosRef.current.y;
+      if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+        // Pre-pickup movement → abort (treat as scroll).
+        cleanup();
+      }
+      return;
+    }
+    e.preventDefault();
+    const indicator = resolveTarget(dragRef.current.kind, dragRef.current.id, clientY, rowsRef.current);
+    dragRef.current.pointerY = clientY;
+    dragRef.current.indicator = indicator;
+    setDragState({ ...dragRef.current });
+
+    const vh = window.innerHeight;
+    if (clientY < 60) startAutoscroll(-1);
+    else if (clientY > vh - 60) startAutoscroll(1);
+    else stopAutoscroll();
+  };
+
+  const onPointerUp = (e) => {
+    if (!dragRef.current) { cleanup(); return; }
+    if (e && e.pointerId !== pointerIdRef.current) return;
+    if (dragRef.current.active && dragRef.current.indicator) {
+      onDrop(dragRef.current.kind, dragRef.current.id, dragRef.current.indicator);
+      justDroppedRef.current = Date.now();
+    } else if (dragRef.current.active) {
+      justDroppedRef.current = Date.now();
+    }
+    cleanup();
+  };
+
+  const onPointerCancel = (e) => {
+    if (!dragRef.current) { cleanup(); return; }
+    if (e && e.pointerId !== pointerIdRef.current) return;
+    if (dragRef.current.active) justDroppedRef.current = Date.now();
+    cleanup();
+  };
+
+  // mode: "touch-longpress" (only acts on touch) or "immediate" (only acts on mouse/pen).
+  const startDrag = (kind, id, mode = "touch-longpress") => (e) => {
+    if (e.button != null && e.button !== 0) return;
+    if (dragRef.current) return;
+    const isTouch = e.pointerType === "touch";
+    if (mode === "touch-longpress" && !isTouch) return;
+    if (mode === "immediate" && isTouch) return;
+    dragRef.current = { kind, id, active: false, pointerY: e.clientY, indicator: null };
+    startPosRef.current = { x: e.clientX, y: e.clientY };
+    pointerIdRef.current = e.pointerId;
+    capturedElRef.current = e.currentTarget;
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+    if (isTouch) {
+      longPressTimerRef.current = setTimeout(() => {
+        longPressTimerRef.current = null;
+        if (dragRef.current && !dragRef.current.active) beginActive(startPosRef.current.y);
+      }, 250);
+    } else {
+      beginActive(e.clientY);
+    }
+  };
+
+  useEffect(() => {
+    return () => cleanup();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return { dragState, startDrag, onPointerMove, onPointerUp, onPointerCancel, registerRow, isJustDropped };
+}
+
 async function fetchRemote(pin) {
   const r = await fetch("/api/state", { headers: { "x-pin": pin } });
   if (r.status === 401) throw new Error("bad_pin");
@@ -378,58 +526,128 @@ export default function App() {
     return null;
   };
 
+  // Low-level reducer-style mover. Returns next state with version bumped, or prev on no-op.
+  // op = { kind: "task" | "group", id, target }
+  // target =
+  //   { type: "top", index }
+  //   { type: "group-children", groupId, index }   // task only
+  //   { type: "into-group", groupId }              // task only (append; auto-expand group)
+  const applyMove = (prev, op) => {
+    const { kind, id, target } = op;
+    if (!target) return prev;
+
+    if (kind === "task") {
+      const loc = locateTask(prev.order, id);
+      if (!loc) return prev;
+
+      // Strip task from its current location; remember origin so we can detect no-ops.
+      let order = prev.order
+        .map(e => e.kind === "group" ? { ...e, taskIds: e.taskIds.filter(t => t !== id) } : e)
+        .filter(e => !(e.kind === "task" && e.id === id));
+
+      if (target.type === "top") {
+        // Translate index from prev.order space to the stripped `order` space.
+        let idx = target.index;
+        if (loc.container === "top" && loc.topIdx < idx) idx -= 1;
+        idx = Math.max(0, Math.min(order.length, idx));
+        // No-op detection
+        if (loc.container === "top" && loc.topIdx === target.index) return prev;
+        if (loc.container === "top" && loc.topIdx + 1 === target.index) return prev;
+        order.splice(idx, 0, { kind: "task", id });
+        return { ...prev, order, version: bump(prev) };
+      }
+
+      if (target.type === "group-children") {
+        const g = prev.groups[target.groupId];
+        if (!g) return prev;
+        const groupIdx = order.findIndex(e => e.kind === "group" && e.id === target.groupId);
+        if (groupIdx === -1) return prev;
+        let idx = target.index;
+        if (loc.container === "group" && loc.groupId === target.groupId && loc.childIdx < idx) idx -= 1;
+        const groupEntry = order[groupIdx];
+        idx = Math.max(0, Math.min(groupEntry.taskIds.length, idx));
+        // No-op detection
+        if (loc.container === "group" && loc.groupId === target.groupId && loc.childIdx === target.index) return prev;
+        if (loc.container === "group" && loc.groupId === target.groupId && loc.childIdx + 1 === target.index) return prev;
+        const newTaskIds = [...groupEntry.taskIds];
+        newTaskIds.splice(idx, 0, id);
+        order = order.map((e, i) => i === groupIdx ? { ...e, taskIds: newTaskIds } : e);
+        let groups = prev.groups;
+        if (g.collapsed) {
+          groups = { ...groups, [target.groupId]: { ...g, collapsed: false } };
+        }
+        return { ...prev, order, groups, version: bump(prev) };
+      }
+
+      if (target.type === "into-group") {
+        const g = prev.groups[target.groupId];
+        if (!g) return prev;
+        const groupIdx = order.findIndex(e => e.kind === "group" && e.id === target.groupId);
+        if (groupIdx === -1) return prev;
+        // No-op: already last in this group.
+        if (loc.container === "group" && loc.groupId === target.groupId && loc.childIdx === prev.order[loc.topIdx].taskIds.length - 1) return prev;
+        order = order.map((e, i) => i === groupIdx ? { ...e, taskIds: [...e.taskIds, id] } : e);
+        let groups = prev.groups;
+        if (g.collapsed) {
+          groups = { ...groups, [target.groupId]: { ...g, collapsed: false } };
+        }
+        return { ...prev, order, groups, version: bump(prev) };
+      }
+      return prev;
+    }
+
+    if (kind === "group") {
+      if (target.type !== "top") return prev;
+      const curIdx = prev.order.findIndex(e => e.kind === "group" && e.id === id);
+      if (curIdx === -1) return prev;
+      const entry = prev.order[curIdx];
+      let order = prev.order.filter((_, i) => i !== curIdx);
+      let idx = target.index;
+      if (curIdx < idx) idx -= 1;
+      idx = Math.max(0, Math.min(order.length, idx));
+      if (curIdx === target.index || curIdx + 1 === target.index) return prev;
+      order.splice(idx, 0, entry);
+      return { ...prev, order, version: bump(prev) };
+    }
+
+    return prev;
+  };
+
   const moveTask = (taskId, dir) => {
     setState(prev => {
-      const order = prev.order.map(e => e.kind === "group" ? { ...e, taskIds: [...e.taskIds] } : e);
-      const loc = locateTask(order, taskId);
+      const loc = locateTask(prev.order, taskId);
       if (!loc) return prev;
 
       if (loc.container === "top") {
         if (dir === -1) {
           if (loc.topIdx === 0) return prev;
-          const above = order[loc.topIdx - 1];
+          const above = prev.order[loc.topIdx - 1];
           if (above.kind === "group") {
-            // drop into the group as last child
-            order.splice(loc.topIdx, 1);
-            above.taskIds.push(taskId);
-          } else {
-            // swap with task above
-            [order[loc.topIdx - 1], order[loc.topIdx]] = [order[loc.topIdx], order[loc.topIdx - 1]];
+            return applyMove(prev, { kind: "task", id: taskId, target: { type: "into-group", groupId: above.id } });
           }
+          return applyMove(prev, { kind: "task", id: taskId, target: { type: "top", index: loc.topIdx - 1 } });
         } else {
-          if (loc.topIdx === order.length - 1) return prev;
-          const below = order[loc.topIdx + 1];
+          if (loc.topIdx === prev.order.length - 1) return prev;
+          const below = prev.order[loc.topIdx + 1];
           if (below.kind === "group") {
-            // drop into the group as first child
-            order.splice(loc.topIdx, 1);
-            below.taskIds.unshift(taskId);
-          } else {
-            [order[loc.topIdx], order[loc.topIdx + 1]] = [order[loc.topIdx + 1], order[loc.topIdx]];
+            return applyMove(prev, { kind: "task", id: taskId, target: { type: "group-children", groupId: below.id, index: 0 } });
           }
+          return applyMove(prev, { kind: "task", id: taskId, target: { type: "top", index: loc.topIdx + 2 } });
         }
       } else {
-        const groupEntry = order[loc.topIdx];
+        const groupEntry = prev.order[loc.topIdx];
         if (dir === -1) {
           if (loc.childIdx === 0) {
-            // lift out above the group
-            groupEntry.taskIds.splice(0, 1);
-            order.splice(loc.topIdx, 0, { kind: "task", id: taskId });
-          } else {
-            const arr = groupEntry.taskIds;
-            [arr[loc.childIdx - 1], arr[loc.childIdx]] = [arr[loc.childIdx], arr[loc.childIdx - 1]];
+            return applyMove(prev, { kind: "task", id: taskId, target: { type: "top", index: loc.topIdx } });
           }
+          return applyMove(prev, { kind: "task", id: taskId, target: { type: "group-children", groupId: loc.groupId, index: loc.childIdx - 1 } });
         } else {
           if (loc.childIdx === groupEntry.taskIds.length - 1) {
-            // drop out below the group
-            groupEntry.taskIds.splice(loc.childIdx, 1);
-            order.splice(loc.topIdx + 1, 0, { kind: "task", id: taskId });
-          } else {
-            const arr = groupEntry.taskIds;
-            [arr[loc.childIdx], arr[loc.childIdx + 1]] = [arr[loc.childIdx + 1], arr[loc.childIdx]];
+            return applyMove(prev, { kind: "task", id: taskId, target: { type: "top", index: loc.topIdx + 1 } });
           }
+          return applyMove(prev, { kind: "task", id: taskId, target: { type: "group-children", groupId: loc.groupId, index: loc.childIdx + 2 } });
         }
       }
-      return { ...prev, order, version: bump(prev) };
     });
   };
 
@@ -439,21 +657,117 @@ export default function App() {
       if (!loc) return prev;
       const currentGroup = loc.container === "group" ? loc.groupId : null;
       if (currentGroup === groupId) return prev;
-
-      let order = prev.order
-        .map(e => e.kind === "group" ? { ...e, taskIds: e.taskIds.filter(t => t !== taskId) } : e)
-        .filter(e => !(e.kind === "task" && e.id === taskId));
-
       if (groupId && prev.groups[groupId]) {
-        order = order.map(e =>
-          e.kind === "group" && e.id === groupId
-            ? { ...e, taskIds: [...e.taskIds, taskId] }
-            : e
-        );
-      } else {
-        order = [...order, { kind: "task", id: taskId }];
+        return applyMove(prev, { kind: "task", id: taskId, target: { type: "into-group", groupId } });
       }
-      return { ...prev, order, version: bump(prev) };
+      return applyMove(prev, { kind: "task", id: taskId, target: { type: "top", index: prev.order.length } });
+    });
+  };
+
+  const resolveDropTarget = (dragKind, dragId, clientY, rowsMap) => {
+    // Build an ordered list of rendered rows with rects + meta.
+    const rendered = [];
+    rowsMap.forEach(({ el, meta }, key) => {
+      const rect = el.getBoundingClientRect();
+      rendered.push({ key, rect, meta });
+    });
+    rendered.sort((a, b) => a.rect.top - b.rect.top);
+    if (rendered.length === 0) return null;
+
+    if (dragKind === "task") {
+      // Check "into-group" first (middle 60% of group header rect).
+      for (const r of rendered) {
+        if (r.meta.kind !== "group-header") continue;
+        const h = r.rect.height;
+        const midTop = r.rect.top + h * 0.2;
+        const midBot = r.rect.bottom - h * 0.2;
+        if (clientY >= midTop && clientY <= midBot) {
+          // No-op: dragging a task already last in this group? applyMove handles it.
+          return { type: "into-group", groupId: r.meta.groupId };
+        }
+      }
+      // Otherwise: find nearest "between" boundary.
+      // Build between-slots in order. Slot meta: { target, boundaryY }
+      const slots = [];
+      for (let i = 0; i < rendered.length; i++) {
+        const r = rendered[i];
+        // "before this row"
+        const target = beforeRowTaskTarget(r.meta);
+        if (target) slots.push({ target, y: r.rect.top });
+      }
+      // "after last row" — use last-rendered row's bottom
+      const last = rendered[rendered.length - 1];
+      const lastTarget = afterRowTaskTarget(last.meta, rendered);
+      if (lastTarget) slots.push({ target: lastTarget, y: last.rect.bottom });
+      // Find slot with closest boundaryY.
+      let best = null;
+      let bestDist = Infinity;
+      for (const s of slots) {
+        const d = Math.abs(s.y - clientY);
+        if (d < bestDist) { bestDist = d; best = s; }
+      }
+      if (!best) return null;
+      return best.target;
+    }
+
+    if (dragKind === "group") {
+      // Only "between top-level entries" slots are valid.
+      const slots = [];
+      for (let i = 0; i < rendered.length; i++) {
+        const r = rendered[i];
+        if (r.meta.parentGroupId) continue; // skip group children
+        slots.push({ target: { type: "top", index: r.meta.indexInOrder }, y: r.rect.top });
+      }
+      // Slot at end: just past the last top-level rendered entry.
+      // Find last top-level row by display order.
+      let lastTop = null;
+      for (let i = rendered.length - 1; i >= 0; i--) {
+        if (!rendered[i].meta.parentGroupId) { lastTop = rendered[i]; break; }
+      }
+      if (lastTop) slots.push({ target: { type: "top", index: state.order.length }, y: lastTop.rect.bottom });
+      let best = null;
+      let bestDist = Infinity;
+      for (const s of slots) {
+        const d = Math.abs(s.y - clientY);
+        if (d < bestDist) { bestDist = d; best = s; }
+      }
+      if (!best) return null;
+      return best.target;
+    }
+
+    return null;
+  };
+
+  // Helpers used by resolveDropTarget. Kept inside App so they can close over `state`.
+  function beforeRowTaskTarget(meta) {
+    if (meta.parentGroupId) {
+      return { type: "group-children", groupId: meta.parentGroupId, index: meta.indexInGroup };
+    }
+    return { type: "top", index: meta.indexInOrder };
+  }
+  function afterRowTaskTarget(meta) {
+    if (meta.parentGroupId) {
+      // After last child in this group → still inside the group (append).
+      return { type: "group-children", groupId: meta.parentGroupId, index: meta.indexInGroup + 1 };
+    }
+    return { type: "top", index: meta.indexInOrder + 1 };
+  }
+
+  const dnd = useDragAndDrop({
+    resolveTarget: resolveDropTarget,
+    onDrop: (kind, id, target) => {
+      setState(prev => applyMove(prev, { kind, id, target }));
+    },
+  });
+
+  const moveGroup = (groupId, dir) => {
+    setState(prev => {
+      const idx = prev.order.findIndex(e => e.kind === "group" && e.id === groupId);
+      if (idx === -1) return prev;
+      if (dir === -1 && idx === 0) return prev;
+      if (dir === +1 && idx === prev.order.length - 1) return prev;
+      const targetIdx = dir === -1 ? idx - 1 : idx + 2;
+      return applyMove(prev, { kind: "group", id: groupId, target: { type: "top", index: targetIdx } });
     });
   };
 
@@ -579,6 +893,28 @@ export default function App() {
     const canMoveUp = opts?.canMoveUp !== false;
     const canMoveDown = opts?.canMoveDown !== false;
     const currentGroupId = opts?.currentGroupId || "";
+    const parentGroupId = opts?.parentGroupId || null;
+    const indexInOrder = opts?.indexInOrder;
+    const indexInGroup = opts?.indexInGroup;
+    const rowKey = `t-${taskId}`;
+    const meta = { kind: "task-row", parentGroupId, indexInOrder, indexInGroup };
+    const isLastTopRow = !!opts?.isLastTopRow;
+    const isLastChildInGroup = !!opts?.isLastChildInGroup;
+    const isDragging = dnd.dragState?.kind === "task" && dnd.dragState?.id === taskId;
+    const ind = dnd.dragState?.indicator;
+    const showLineAbove =
+      ind && dnd.dragState?.kind === "task" && (
+        (ind.type === "top" && !parentGroupId && ind.index === indexInOrder) ||
+        (ind.type === "group-children" && parentGroupId && ind.groupId === parentGroupId && ind.index === indexInGroup)
+      );
+    const showLineBelow = ind && (
+      (dnd.dragState?.kind === "task" && (
+        (ind.type === "top" && !parentGroupId && isLastTopRow && ind.index === state.order.length) ||
+        (ind.type === "group-children" && parentGroupId && ind.groupId === parentGroupId && isLastChildInGroup && ind.index === indexInGroup + 1)
+      )) ||
+      (dnd.dragState?.kind === "group" && isLastTopRow && ind.type === "top" && ind.index === state.order.length)
+    );
+    const dragDeltaY = isDragging ? (dnd.dragState.pointerY - dnd.dragState.startY) : 0;
 
     if (editingTaskId === taskId) {
       return (
@@ -631,30 +967,84 @@ export default function App() {
     }
 
     return (
-      <div key={taskId} style={{
-        display: "grid", gridTemplateColumns: theme.gridCols, padding: theme.rowPad,
-        gap: 2, alignItems: "center", borderTop: "1px solid #f0f0f0",
-      }}>
+      <div
+        key={taskId}
+        ref={el => dnd.registerRow(rowKey, el, meta)}
+        onPointerDown={dnd.startDrag("task", taskId, "touch-longpress")}
+        onPointerMove={dnd.onPointerMove}
+        onPointerUp={dnd.onPointerUp}
+        onPointerCancel={dnd.onPointerCancel}
+        style={{
+          display: "grid",
+          gridTemplateColumns: wide ? `16px ${theme.gridCols}` : theme.gridCols,
+          padding: theme.rowPad,
+          gap: 2, alignItems: "center", borderTop: "1px solid #f0f0f0",
+          touchAction: isDragging ? "none" : "pan-y",
+          position: "relative",
+          zIndex: isDragging ? 10 : "auto",
+          opacity: isDragging ? 0.55 : 1,
+          background: isDragging ? "#fff" : undefined,
+          boxShadow: isDragging ? "0 8px 24px rgba(0,0,0,0.18)" : undefined,
+          transform: isDragging ? `scale(1.01) translateY(${dragDeltaY}px)` : undefined,
+          transition: isDragging ? "none" : undefined,
+        }}
+      >
+        {showLineAbove && (
+          <div style={{
+            position: "absolute", left: 0, right: 0, top: -1, height: 2,
+            background: "#000", pointerEvents: "none", zIndex: 5,
+          }} />
+        )}
+        {showLineBelow && (
+          <div style={{
+            position: "absolute", left: 0, right: 0, bottom: -1, height: 2,
+            background: "#000", pointerEvents: "none", zIndex: 5,
+          }} />
+        )}
+        {wide && (
+          <div
+            onPointerDown={dnd.startDrag("task", taskId, "immediate")}
+            onClick={e => e.stopPropagation()}
+            style={{
+              cursor: "grab", color: "#bbb", fontSize: 12, lineHeight: 1,
+              userSelect: "none", padding: "6px 2px", textAlign: "center",
+              touchAction: "none",
+            }}
+            aria-hidden="true"
+          >⋮⋮</div>
+        )}
         <div
-          onClick={() => startEditTask(taskId)}
+          onClick={(e) => { if (dnd.isJustDropped()) { e.preventDefault(); return; } startEditTask(taskId); }}
           style={{
-            fontSize: 15, color: "#111", padding: "12px 8px 12px 0",
+            display: "flex", alignItems: "center", gap: 8,
+            padding: "12px 8px 12px 0",
             paddingLeft: indented ? 20 : 0,
             cursor: "pointer", userSelect: "none",
-            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            minWidth: 0,
           }}
-        >{task.name}</div>
+        >
+          <span style={{
+            fontSize: 15, color: "#111", flex: 1, minWidth: 0,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }}>{task.name}</span>
+          <span style={{
+            fontSize: 11, color: "#999", fontVariantNumeric: "tabular-nums",
+            flexShrink: 0,
+          }}>{Math.round(DAYS.filter((_, di) => checks[`${taskId}_${di}`]).length / 7 * 100)}%</span>
+        </div>
         {DAYS.map((_, di) => {
           const on = !!checks[`${taskId}_${di}`];
           const today = di === todayCol;
           return (
             <div
               key={di}
-              onClick={() => toggle(taskId, di)}
+              onPointerDown={e => e.stopPropagation()}
+              onClick={(e) => { if (dnd.isJustDropped()) { e.preventDefault(); return; } toggle(taskId, di); }}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center",
                 height: theme.rowHeight, cursor: "pointer",
                 background: today ? "#fafafa" : "transparent",
+                touchAction: "manipulation",
               }}
             >
               <div style={{
@@ -677,13 +1067,28 @@ export default function App() {
     );
   };
 
-  const renderGroupHeader = (entry) => {
+  const renderGroupHeader = (entry, opts) => {
     const group = state.groups[entry.id];
     if (!group) return null;
     const childCount = entry.taskIds.length;
-    const groupDone = entry.taskIds.reduce((acc, tid) =>
-      acc + DAYS.filter((_, di) => checks[`${tid}_${di}`]).length, 0);
-    const groupTotal = childCount * 7;
+    const canMoveUp = opts?.canMoveUp !== false;
+    const canMoveDown = opts?.canMoveDown !== false;
+    const indexInOrder = opts?.indexInOrder;
+    const rowKey = `g-${entry.id}`;
+    const meta = { kind: "group-header", groupId: entry.id, parentGroupId: null, indexInOrder };
+    const isDragging = dnd.dragState?.kind === "group" && dnd.dragState?.id === entry.id;
+    const ind = dnd.dragState?.indicator;
+    const isIntoTarget =
+      ind && dnd.dragState?.kind === "task" && ind.type === "into-group" && ind.groupId === entry.id;
+    const showLineAbove =
+      ind && (
+        (dnd.dragState?.kind === "task" && ind.type === "top" && ind.index === indexInOrder) ||
+        (dnd.dragState?.kind === "group" && ind.type === "top" && ind.index === indexInOrder)
+      );
+    const isLastTopRow = !!opts?.isLastTopRow;
+    const showLineBelow =
+      ind && isLastTopRow && ind.type === "top" && ind.index === state.order.length;
+    const dragDeltaY = isDragging ? (dnd.dragState.pointerY - dnd.dragState.startY) : 0;
 
     if (editingGroupId === entry.id) {
       return (
@@ -705,6 +1110,18 @@ export default function App() {
               border: "1px solid #ddd", borderRadius: 8, outline: "none",
             }}
           />
+          <button
+            onClick={() => moveGroup(entry.id, -1)}
+            disabled={!canMoveUp}
+            style={{ ...btnIcon, opacity: canMoveUp ? 1 : 0.35, cursor: canMoveUp ? "pointer" : "default" }}
+            aria-label="Move group up"
+          >↑</button>
+          <button
+            onClick={() => moveGroup(entry.id, +1)}
+            disabled={!canMoveDown}
+            style={{ ...btnIcon, opacity: canMoveDown ? 1 : 0.35, cursor: canMoveDown ? "pointer" : "default" }}
+            aria-label="Move group down"
+          >↓</button>
           <button onClick={saveEditGroup} style={btnPrimary}>Save</button>
           <button onClick={() => deleteGroup(entry.id)} style={btnDanger}>Delete</button>
         </div>
@@ -712,24 +1129,52 @@ export default function App() {
     }
 
     return (
-      <div key={`g-${entry.id}`} style={{
-        display: "flex", alignItems: "center",
-        padding: `10px ${wide ? 24 : 16}px`,
-        borderTop: "1px solid #f0f0f0",
-        background: "#fafafa",
-        gap: 8,
-      }}>
+      <div
+        key={`g-${entry.id}`}
+        ref={el => dnd.registerRow(rowKey, el, meta)}
+        onPointerDown={dnd.startDrag("group", entry.id)}
+        onPointerMove={dnd.onPointerMove}
+        onPointerUp={dnd.onPointerUp}
+        onPointerCancel={dnd.onPointerCancel}
+        style={{
+          display: "flex", alignItems: "center",
+          padding: `10px ${wide ? 24 : 16}px`,
+          borderTop: "1px solid #f0f0f0",
+          background: isIntoTarget ? "rgba(0,0,0,0.04)" : "#fafafa",
+          gap: 8,
+          touchAction: isDragging ? "none" : "pan-y",
+          position: "relative",
+          zIndex: isDragging ? 10 : "auto",
+          opacity: isDragging ? 0.55 : 1,
+          boxShadow: isDragging ? "0 8px 24px rgba(0,0,0,0.18)" : undefined,
+          transform: isDragging ? `scale(1.01) translateY(${dragDeltaY}px)` : undefined,
+        }}
+      >
+        {showLineAbove && (
+          <div style={{
+            position: "absolute", left: 0, right: 0, top: -1, height: 2,
+            background: "#000", pointerEvents: "none", zIndex: 5,
+          }} />
+        )}
+        {showLineBelow && (
+          <div style={{
+            position: "absolute", left: 0, right: 0, bottom: -1, height: 2,
+            background: "#000", pointerEvents: "none", zIndex: 5,
+          }} />
+        )}
         <button
-          onClick={() => toggleGroupCollapsed(entry.id)}
+          onPointerDown={e => e.stopPropagation()}
+          onClick={(e) => { if (dnd.isJustDropped()) { e.preventDefault(); return; } toggleGroupCollapsed(entry.id); }}
           style={{
             background: "transparent", border: "none", cursor: "pointer",
             fontSize: 16, color: "#555", padding: "8px 10px", fontFamily: FONT,
             minWidth: 40, minHeight: 40, textAlign: "center",
+            touchAction: "manipulation",
           }}
           aria-label={group.collapsed ? "Expand" : "Collapse"}
         >{group.collapsed ? "▸" : "▾"}</button>
         <div
-          onClick={() => startEditGroup(entry.id)}
+          onClick={(e) => { if (dnd.isJustDropped()) { e.preventDefault(); return; } startEditGroup(entry.id); }}
           style={{
             flex: 1, fontSize: 14, fontWeight: 600, color: "#333",
             cursor: "pointer", userSelect: "none",
@@ -739,7 +1184,7 @@ export default function App() {
         >{group.name}</div>
         {childCount > 0 && (
           <div style={{ fontSize: 12, color: "#888", fontVariantNumeric: "tabular-nums" }}>
-            {groupDone}/{groupTotal}
+            {childCount} task{childCount === 1 ? "" : "s"}
           </div>
         )}
       </div>
@@ -747,28 +1192,46 @@ export default function App() {
   };
 
   const renderItems = [];
+  const lastEntry = state.order[state.order.length - 1];
+  const lastIsOpenGroupWithChildren =
+    lastEntry && lastEntry.kind === "group" &&
+    state.groups[lastEntry.id] && !state.groups[lastEntry.id].collapsed &&
+    lastEntry.taskIds.length > 0;
   state.order.forEach((entry, idx) => {
+    const isLastTopIdx = idx === state.order.length - 1;
     if (entry.kind === "task") {
       renderItems.push(renderTaskRow(entry.id, {
         indented: false,
         canMoveUp: idx > 0,
         canMoveDown: idx < state.order.length - 1,
         currentGroupId: "",
+        parentGroupId: null,
+        indexInOrder: idx,
+        isLastTopRow: isLastTopIdx,
       }));
     } else if (entry.kind === "group") {
-      renderItems.push(renderGroupHeader(entry));
+      renderItems.push(renderGroupHeader(entry, {
+        canMoveUp: idx > 0,
+        canMoveDown: idx < state.order.length - 1,
+        indexInOrder: idx,
+        isLastTopRow: isLastTopIdx && !lastIsOpenGroupWithChildren,
+      }));
       const group = state.groups[entry.id];
       if (group && !group.collapsed) {
         entry.taskIds.forEach((tid, ci) => {
           const isFirstChild = ci === 0;
           const isLastChild = ci === entry.taskIds.length - 1;
           const groupIsFirst = idx === 0;
-          const groupIsLast = idx === state.order.length - 1;
+          const groupIsLast = isLastTopIdx;
           renderItems.push(renderTaskRow(tid, {
             indented: true,
             canMoveUp: !(isFirstChild && groupIsFirst),
             canMoveDown: !(isLastChild && groupIsLast),
             currentGroupId: entry.id,
+            parentGroupId: entry.id,
+            indexInGroup: ci,
+            isLastChildInGroup: isLastChild,
+            isLastTopRow: groupIsLast && isLastChild,
           }));
         });
       }
@@ -815,9 +1278,12 @@ export default function App() {
 
         {/* Day header row */}
         <div style={{
-          display: "grid", gridTemplateColumns: theme.gridCols, padding: theme.rowPad,
+          display: "grid",
+          gridTemplateColumns: wide ? `16px ${theme.gridCols}` : theme.gridCols,
+          padding: theme.rowPad,
           gap: 2, marginBottom: 2, alignItems: "center",
         }}>
+          {wide && <div />}
           <div />
           {DAYS.map((d, di) => (
             <div key={di} style={{
