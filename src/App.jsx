@@ -938,7 +938,6 @@ export default function App() {
   const weekDone = allTaskIds.reduce((acc, tid) =>
     acc + DAYS.filter((_, di) => checks[`${tid}_${di}`]).length, 0);
   const weekTotal = allTaskIds.length * 7;
-  const pct = weekTotal ? Math.round((weekDone / weekTotal) * 100) : 0;
 
   const groupList = state.order.filter(e => e.kind === "group");
   const groupOptions = groupList.map(e => ({ id: e.id, name: state.groups[e.id]?.name || "(untitled)" }));
@@ -1324,10 +1323,7 @@ export default function App() {
       }}>
         {/* Header */}
         <div style={{ padding: `calc(env(safe-area-inset-top) + 18px) ${wide ? 24 : 16}px 14px` }}>
-          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
-            <div style={{ fontSize: theme.titleSize, fontWeight: 600, letterSpacing: -0.3 }}>Weekly Tracker</div>
-            <div style={{ fontSize: 14, color: "#555", fontVariantNumeric: "tabular-nums" }}>{pct}%</div>
-          </div>
+          <div style={{ fontSize: theme.titleSize, fontWeight: 600, letterSpacing: -0.3 }}>Weekly Tracker</div>
           <div style={{
             display: "flex", alignItems: "center", justifyContent: "space-between",
             marginTop: 4,
@@ -1342,9 +1338,6 @@ export default function App() {
             }}>
               ● {STATUS_LABEL[syncStatus]}
             </button>
-          </div>
-          <div style={{ height: 3, background: "#eee", borderRadius: 2, marginTop: 12, overflow: "hidden" }}>
-            <div style={{ width: `${pct}%`, height: "100%", background: "#000", transition: "width .25s ease" }} />
           </div>
         </div>
 
