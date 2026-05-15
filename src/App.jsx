@@ -382,7 +382,7 @@ export default function App() {
   const wide = useMediaQuery("(min-width: 700px)");
   const theme = wide ? {
     maxWidth: 720,
-    gridCols: "1fr repeat(7, 52px)",
+    gridCols: "minmax(0, 1fr) repeat(7, 52px)",
     rowPad: "0 24px",
     titleSize: 24,
     checkSize: 26,
@@ -390,8 +390,8 @@ export default function App() {
     rowHeight: 52,
   } : {
     maxWidth: 440,
-    gridCols: "1fr repeat(7, 32px)",
-    rowPad: "0 16px",
+    gridCols: "minmax(0, 1fr) repeat(7, 30px)",
+    rowPad: "0 12px",
     titleSize: 22,
     checkSize: 22,
     checkBorder: 1.5,
