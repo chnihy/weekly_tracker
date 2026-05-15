@@ -1353,7 +1353,12 @@ export default function App() {
           display: "grid",
           gridTemplateColumns: `32px ${theme.gridCols}`,
           padding: theme.rowPad,
-          gap: 2, marginBottom: 2, alignItems: "center",
+          gap: 2, alignItems: "center",
+          position: "sticky",
+          top: "env(safe-area-inset-top)",
+          zIndex: 20,
+          background: "#fff",
+          borderBottom: "1px solid #f0f0f0",
         }}>
           <div />
           <div />
