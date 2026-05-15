@@ -1100,7 +1100,7 @@ export default function App() {
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center",
                 height: theme.rowHeight, cursor: "pointer",
-                background: today ? "#fafafa" : "transparent",
+                background: today ? "#ededed" : "transparent",
                 touchAction: "manipulation",
               }}
             >
@@ -1355,14 +1355,29 @@ export default function App() {
         }}>
           <div />
           <div />
-          {DAYS.map((d, di) => (
-            <div key={di} style={{
-              textAlign: "center", fontSize: 11,
-              color: di === todayCol ? "#000" : "#aaa",
-              fontWeight: di === todayCol ? 700 : 500,
-              padding: "6px 0", letterSpacing: 0.5,
-            }}>{d}</div>
-          ))}
+          {DAYS.map((d, di) => {
+            const isToday = di === todayCol;
+            return (
+              <div key={di} style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                padding: "5px 0",
+                background: isToday ? "#ededed" : "transparent",
+              }}>
+                {isToday ? (
+                  <div style={{
+                    width: 22, height: 22, borderRadius: "50%",
+                    background: "#000", color: "#fff",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 11, fontWeight: 700,
+                  }}>{d}</div>
+                ) : (
+                  <div style={{
+                    fontSize: 11, color: "#aaa", fontWeight: 500, letterSpacing: 0.5,
+                  }}>{d}</div>
+                )}
+              </div>
+            );
+          })}
         </div>
 
         {/* Tasks + groups */}
