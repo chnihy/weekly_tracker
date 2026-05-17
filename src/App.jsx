@@ -24,6 +24,113 @@ function formatWeekLabel(weekKey) {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function shiftDate(yyyyMmDd, days) {
+  const d = new Date(yyyyMmDd + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function shiftWeek(weekKey, weeks) {
+  return shiftDate(weekKey, weeks * 7);
+}
+
+function activeWeekKeys(checksByWeek) {
+  const keys = [];
+  for (const [wk, wkChecks] of Object.entries(checksByWeek || {})) {
+    for (const v of Object.values(wkChecks || {})) {
+      if (v) { keys.push(wk); break; }
+    }
+  }
+  keys.sort();
+  return keys;
+}
+
+function lastNWeekKeys(fromWeekKey, n) {
+  const out = [];
+  for (let i = n - 1; i >= 0; i--) out.push(shiftWeek(fromWeekKey, -i));
+  return out;
+}
+
+function taskChecksInWeek(checksByWeek, taskId, weekKey) {
+  const wk = checksByWeek[weekKey];
+  if (!wk) return 0;
+  let n = 0;
+  for (let d = 0; d < 7; d++) if (wk[`${taskId}_${d}`]) n++;
+  return n;
+}
+
+function taskWeekPct(checksByWeek, taskId, weekKey) {
+  return Math.round(taskChecksInWeek(checksByWeek, taskId, weekKey) / 7 * 100);
+}
+
+function taskWindowPct(checksByWeek, taskId, weekKeys) {
+  if (weekKeys.length === 0) return 0;
+  let sum = 0;
+  for (const wk of weekKeys) sum += taskChecksInWeek(checksByWeek, taskId, wk);
+  return Math.round(sum / (weekKeys.length * 7) * 100);
+}
+
+function taskAllTimeStats(checksByWeek, taskId, currentWeekKey) {
+  const active = activeWeekKeys(checksByWeek);
+  if (active.length === 0) return { overallPct: 0 };
+  let totalChecks = 0;
+  let totalSlots = 0;
+  let wk = active[0];
+  while (wk <= currentWeekKey) {
+    totalChecks += taskChecksInWeek(checksByWeek, taskId, wk);
+    totalSlots += 7;
+    wk = shiftWeek(wk, 1);
+  }
+  const overallPct = totalSlots === 0 ? 0 : Math.round(totalChecks / totalSlots * 100);
+  return { overallPct };
+}
+
+function taskWeeklyStreaks(checksByWeek, taskId, currentWeekKey) {
+  const active = activeWeekKeys(checksByWeek);
+  if (active.length === 0) return { current: 0, longest: 0 };
+  const first = active[0];
+  const hits = [];
+  let wk = first;
+  while (wk <= currentWeekKey) {
+    hits.push(taskChecksInWeek(checksByWeek, taskId, wk) > 0);
+    wk = shiftWeek(wk, 1);
+  }
+  let longest = 0, run = 0;
+  for (const h of hits) {
+    if (h) { run++; if (run > longest) longest = run; } else { run = 0; }
+  }
+  let current = 0;
+  let i = hits.length - 1;
+  if (i >= 0 && !hits[i]) i--;
+  for (; i >= 0; i--) {
+    if (hits[i]) current++;
+    else break;
+  }
+  return { current, longest };
+}
+
+function taskWeeklySeries(checksByWeek, taskId, currentWeekKey, n = 12) {
+  const keys = lastNWeekKeys(currentWeekKey, n);
+  return keys.map(wk => ({ weekKey: wk, pct: taskWeekPct(checksByWeek, taskId, wk) }));
+}
+
+function heatmapData(state, currentWeekKey, weeks) {
+  const startWeek = shiftWeek(currentWeekKey, -(weeks - 1));
+  const taskIds = Object.keys(state.tasks);
+  const out = [];
+  for (let w = 0; w < weeks; w++) {
+    const wk = shiftWeek(startWeek, w);
+    const wkChecks = state.checksByWeek[wk] || {};
+    for (let d = 0; d < 7; d++) {
+      let count = 0;
+      for (const tid of taskIds) if (wkChecks[`${tid}_${d}`]) count++;
+      const date = shiftDate(wk, d);
+      out.push({ date, count, weekIdx: w, dayIdx: d });
+    }
+  }
+  return out;
+}
+
 function newId() {
   if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
   return "id_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -409,6 +516,7 @@ export default function App() {
   const stateRef = useRef(null);
   const pinRef = useRef(pin);
 
+  const [view, setView] = useState("grid");
   const [editingTaskId, setEditingTaskId] = useState(null);
   const [editVal, setEditVal] = useState("");
   const [editingGroupId, setEditingGroupId] = useState(null);
@@ -1363,6 +1471,7 @@ export default function App() {
         display: "flex", flexDirection: "column",
         paddingBottom: "env(safe-area-inset-bottom)",
       }}>
+        {view === "grid" && (<>
         {/* Header */}
         <div style={{ padding: `calc(env(safe-area-inset-top) + 18px) ${wide ? 24 : 16}px 14px` }}>
           <div style={{ fontSize: theme.titleSize, fontWeight: 600, letterSpacing: -0.3 }}>Weekly Tracker</div>
@@ -1373,13 +1482,30 @@ export default function App() {
             <div style={{ fontSize: 12, color: "#999" }}>
               Week of {formatWeekLabel(weekKey)} · {weekDone}/{weekTotal}
             </div>
-            <button onClick={() => setPinModal(true)} style={{
-              fontSize: 11, color: STATUS_COLOR[syncStatus],
-              background: "transparent", border: "none", cursor: "pointer",
-              padding: "2px 0", fontFamily: FONT, fontWeight: 500,
-            }}>
-              ● {STATUS_LABEL[syncStatus]}
-            </button>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <button onClick={() => setPinModal(true)} style={{
+                fontSize: 11, color: STATUS_COLOR[syncStatus],
+                background: "transparent", border: "none", cursor: "pointer",
+                padding: "2px 0", fontFamily: FONT, fontWeight: 500,
+              }}>
+                ● {STATUS_LABEL[syncStatus]}
+              </button>
+              <button
+                onClick={() => setView("stats")}
+                aria-label="Stats"
+                style={{
+                  background: "transparent", border: "none", cursor: "pointer",
+                  padding: "4px 4px", display: "flex", alignItems: "center",
+                  color: "#666",
+                }}
+              >
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                  <rect x="2" y="10" width="3" height="6" fill="currentColor" />
+                  <rect x="7.5" y="6" width="3" height="10" fill="currentColor" />
+                  <rect x="13" y="2" width="3" height="14" fill="currentColor" />
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1482,6 +1608,17 @@ export default function App() {
             }}>+ Add group</button>
           )}
         </div>
+        </>)}
+
+        {view === "stats" && (
+          <StatsScreen
+            state={state}
+            weekKey={weekKey}
+            wide={wide}
+            theme={theme}
+            onBack={() => setView("grid")}
+          />
+        )}
       </div>
 
       {pinModal && (
@@ -1554,5 +1691,266 @@ function PinModal({ currentPin, status, onSave, onClear, onCancel }) {
         </div>
       </div>
     </div>
+  );
+}
+
+const HEAT_COLORS = ["#f0f0f0", "#d4d4d4", "#a0a0a0", "#555", "#000"];
+
+function heatBucket(count, totalTasks) {
+  if (count <= 0 || totalTasks <= 0) return 0;
+  const r = count / totalTasks;
+  if (r >= 1) return 4;
+  if (r >= 0.66) return 3;
+  if (r >= 0.33) return 2;
+  return 1;
+}
+
+function Heatmap({ weeks, state, currentWeekKey, wide }) {
+  const data = heatmapData(state, currentWeekKey, weeks);
+  const totalTasks = Object.keys(state.tasks).length || 1;
+  const cell = wide ? 12 : 9;
+  const gap = 2;
+  const leftPad = 14;
+  const topPad = 14;
+  const width = leftPad + weeks * (cell + gap);
+  const height = topPad + 7 * (cell + gap);
+
+  const monthLabels = [];
+  let lastMonth = -1;
+  for (let w = 0; w < weeks; w++) {
+    const wk = shiftWeek(currentWeekKey, -(weeks - 1 - w));
+    const d = new Date(wk + "T00:00:00Z");
+    const m = d.getUTCMonth();
+    if (m !== lastMonth) {
+      monthLabels.push({ w, label: d.toLocaleDateString(undefined, { month: "short", timeZone: "UTC" }) });
+      lastMonth = m;
+    }
+  }
+
+  const dayLabels = [
+    { i: 0, t: "M" },
+    { i: 2, t: "W" },
+    { i: 4, t: "F" },
+  ];
+
+  return (
+    <div style={{ width: "100%", overflowX: "auto" }}>
+      <svg width={width} height={height} style={{ display: "block" }} role="img" aria-label="Daily activity heatmap">
+        {monthLabels.map(m => (
+          <text
+            key={m.w}
+            x={leftPad + m.w * (cell + gap)}
+            y={10}
+            fontSize={9}
+            fill="#999"
+            fontFamily={FONT}
+          >{m.label}</text>
+        ))}
+        {dayLabels.map(dl => (
+          <text
+            key={dl.i}
+            x={0}
+            y={topPad + dl.i * (cell + gap) + cell - 1}
+            fontSize={9}
+            fill="#999"
+            fontFamily={FONT}
+          >{dl.t}</text>
+        ))}
+        {data.map(d => {
+          const b = heatBucket(d.count, totalTasks);
+          return (
+            <rect
+              key={`${d.weekIdx}_${d.dayIdx}`}
+              x={leftPad + d.weekIdx * (cell + gap)}
+              y={topPad + d.dayIdx * (cell + gap)}
+              width={cell}
+              height={cell}
+              rx={1.5}
+              fill={HEAT_COLORS[b]}
+            >
+              <title>{`${d.date} · ${d.count}/${totalTasks}`}</title>
+            </rect>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function WeeklyBarChart({ series }) {
+  const height = 48;
+  const barW = 10;
+  const gap = 3;
+  const width = series.length * (barW + gap);
+  return (
+    <svg
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="none"
+      width="100%"
+      height={height}
+      style={{ display: "block" }}
+      role="img"
+      aria-label="Last 12 weeks"
+    >
+      {series.map((s, i) => {
+        const x = i * (barW + gap);
+        const h = Math.max(1, Math.round((s.pct / 100) * height));
+        const isLast = i === series.length - 1;
+        return (
+          <g key={s.weekKey}>
+            <rect x={x} y={0} width={barW} height={height} fill="#f0f0f0" rx={1.5} />
+            <rect
+              x={x}
+              y={height - h}
+              width={barW}
+              height={h}
+              fill={isLast ? "#000" : "#333"}
+              rx={1.5}
+            >
+              <title>{`${s.weekKey} · ${s.pct}%`}</title>
+            </rect>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+function TaskCard({ task, stats, theme }) {
+  return (
+    <div style={{
+      background: "#fff",
+      borderTop: "1px solid #f0f0f0",
+      padding: theme.rowPad,
+      paddingTop: 12,
+      paddingBottom: 14,
+    }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
+        <span style={{
+          fontSize: 15, color: "#111", fontWeight: 500,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>{task.name}</span>
+        <span style={{ fontSize: 11, color: "#999", fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>
+          {stats.allTime.overallPct}%
+        </span>
+      </div>
+      <div style={{ fontSize: 12, color: "#666", marginTop: 4, fontVariantNumeric: "tabular-nums" }}>
+        This week {stats.thisWeekChecks}/7 · 4w {stats.pct4}% · 12w {stats.pct12}%
+      </div>
+      <div style={{ fontSize: 12, color: "#666", marginTop: 4, fontVariantNumeric: "tabular-nums" }}>
+        Streak {stats.streak.current}w · Best {stats.streak.longest}w
+      </div>
+      <div style={{ marginTop: 8 }}>
+        <WeeklyBarChart series={stats.series} />
+      </div>
+    </div>
+  );
+}
+
+function StatsScreen({ state, weekKey, wide, theme, onBack }) {
+  const activeKeys = activeWeekKeys(state.checksByWeek);
+  const taskCount = Object.keys(state.tasks).length;
+  const weeksCount = activeKeys.length;
+  const last4 = lastNWeekKeys(weekKey, 4);
+  const last12 = lastNWeekKeys(weekKey, 12);
+
+  const renderEntries = [];
+  state.order.forEach((entry) => {
+    if (entry.kind === "group") {
+      const g = state.groups[entry.id];
+      if (!g) return;
+      renderEntries.push({ kind: "group", id: entry.id, name: g.name });
+      for (const tid of entry.taskIds) {
+        if (state.tasks[tid]) renderEntries.push({ kind: "task", id: tid });
+      }
+    } else if (entry.kind === "task") {
+      if (state.tasks[entry.id]) renderEntries.push({ kind: "task", id: entry.id });
+    }
+  });
+
+  const taskStats = (tid) => ({
+    thisWeekChecks: taskChecksInWeek(state.checksByWeek, tid, weekKey),
+    pct4: taskWindowPct(state.checksByWeek, tid, last4),
+    pct12: taskWindowPct(state.checksByWeek, tid, last12),
+    allTime: taskAllTimeStats(state.checksByWeek, tid, weekKey),
+    streak: taskWeeklyStreaks(state.checksByWeek, tid, weekKey),
+    series: taskWeeklySeries(state.checksByWeek, tid, weekKey, 12),
+  });
+
+  return (
+    <>
+      <div style={{ padding: `calc(env(safe-area-inset-top) + 18px) ${wide ? 24 : 16}px 14px` }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button
+            onClick={onBack}
+            aria-label="Back"
+            style={{
+              background: "transparent", border: "none", cursor: "pointer",
+              padding: 4, display: "flex", alignItems: "center", color: "#444",
+              marginLeft: -4,
+            }}
+          >
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <path d="M12 4L6 10L12 16" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          <div style={{ fontSize: theme.titleSize, fontWeight: 600, letterSpacing: -0.3 }}>Stats</div>
+        </div>
+        <div style={{ fontSize: 12, color: "#999", marginTop: 4 }}>
+          Across {weeksCount} week{weeksCount === 1 ? "" : "s"} · {taskCount} task{taskCount === 1 ? "" : "s"}
+        </div>
+      </div>
+
+      <div style={{ padding: `4px ${wide ? 24 : 16}px 18px`, borderTop: "1px solid #f0f0f0" }}>
+        <div style={{
+          fontSize: 11, color: "#999", textTransform: "uppercase", letterSpacing: 0.5,
+          margin: "12px 0 10px",
+        }}>
+          Daily activity · last 6 months
+        </div>
+        <Heatmap weeks={26} state={state} currentWeekKey={weekKey} wide={wide} />
+      </div>
+
+      <div style={{ flex: 1 }}>
+        <div style={{
+          fontSize: 11, color: "#999", textTransform: "uppercase", letterSpacing: 0.5,
+          padding: `14px ${wide ? 24 : 16}px 8px`, borderTop: "1px solid #f0f0f0",
+        }}>
+          Tasks
+        </div>
+        {renderEntries.length === 0 && (
+          <div style={{ padding: theme.rowPad, paddingTop: 16, paddingBottom: 16, fontSize: 13, color: "#999" }}>
+            No tasks yet.
+          </div>
+        )}
+        {renderEntries.map((e) => {
+          if (e.kind === "group") {
+            return (
+              <div
+                key={`g-${e.id}`}
+                style={{
+                  padding: `10px ${wide ? 24 : 16}px`,
+                  borderTop: "1px solid #f0f0f0",
+                  background: "#fafafa",
+                  fontSize: 14, fontWeight: 600, color: "#333",
+                  letterSpacing: 0.2, textTransform: "uppercase",
+                }}
+              >{e.name}</div>
+            );
+          }
+          const t = state.tasks[e.id];
+          if (!t) return null;
+          return (
+            <TaskCard
+              key={`t-${e.id}`}
+              task={t}
+              stats={taskStats(e.id)}
+              theme={theme}
+            />
+          );
+        })}
+        <div style={{ height: 24 }} />
+      </div>
+    </>
   );
 }
