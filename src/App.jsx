@@ -483,6 +483,7 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
+    let pollId = null;
     const flush = () => {
       const p = pinRef.current;
       const s = stateRef.current;
@@ -496,10 +497,10 @@ export default function App() {
         });
       } catch {}
     };
-    const refetch = () => {
+    const sync = (quiet) => {
       const p = pinRef.current;
       if (!p || !loadedRef.current) return;
-      setSyncStatus("syncing");
+      if (!quiet) setSyncStatus("syncing");
       fetchRemote(p).then(server => {
         if (cancelled) return;
         const migrated = migrate(server);
@@ -518,14 +519,28 @@ export default function App() {
         else setSyncStatus("offline");
       });
     };
-    const onVis = () => {
-      if (document.visibilityState === "hidden") flush();
-      else if (document.visibilityState === "visible") refetch();
+    const startPolling = () => {
+      if (pollId != null) return;
+      pollId = setInterval(() => sync(true), 5000);
     };
+    const stopPolling = () => {
+      if (pollId != null) { clearInterval(pollId); pollId = null; }
+    };
+    const onVis = () => {
+      if (document.visibilityState === "hidden") {
+        flush();
+        stopPolling();
+      } else if (document.visibilityState === "visible") {
+        sync(false);
+        startPolling();
+      }
+    };
+    if (document.visibilityState === "visible") startPolling();
     window.addEventListener("pagehide", flush);
     document.addEventListener("visibilitychange", onVis);
     return () => {
       cancelled = true;
+      stopPolling();
       window.removeEventListener("pagehide", flush);
       document.removeEventListener("visibilitychange", onVis);
     };
