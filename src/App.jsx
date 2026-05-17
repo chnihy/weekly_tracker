@@ -482,6 +482,7 @@ export default function App() {
   }, [state, pin]);
 
   useEffect(() => {
+    let cancelled = false;
     const flush = () => {
       const p = pinRef.current;
       const s = stateRef.current;
@@ -495,10 +496,36 @@ export default function App() {
         });
       } catch {}
     };
-    const onVis = () => { if (document.visibilityState === "hidden") flush(); };
+    const refetch = () => {
+      const p = pinRef.current;
+      if (!p || !loadedRef.current) return;
+      setSyncStatus("syncing");
+      fetchRemote(p).then(server => {
+        if (cancelled) return;
+        const migrated = migrate(server);
+        const serverVersion = migrated?.version || 0;
+        const localVersion = stateRef.current?.version || 0;
+        if (migrated && serverVersion > localVersion) {
+          setState(migrated);
+        } else if (!migrated || localVersion > serverVersion) {
+          pushRemote(p, stateRef.current).catch(() => {});
+        }
+        setSyncStatus("synced");
+      }).catch(err => {
+        if (cancelled) return;
+        if (err.message === "bad_pin") setSyncStatus("bad_pin");
+        else if (err.message === "not_configured") setSyncStatus("not_configured");
+        else setSyncStatus("offline");
+      });
+    };
+    const onVis = () => {
+      if (document.visibilityState === "hidden") flush();
+      else if (document.visibilityState === "visible") refetch();
+    };
     window.addEventListener("pagehide", flush);
     document.addEventListener("visibilitychange", onVis);
     return () => {
+      cancelled = true;
       window.removeEventListener("pagehide", flush);
       document.removeEventListener("visibilitychange", onVis);
     };
