@@ -1,4 +1,4 @@
-const CACHE = 'weekly-tracker-v2';
+const CACHE = 'weekly-tracker-v3';
 const ASSETS = ['/', '/index.html', '/manifest.json'];
 
 self.addEventListener('install', e => {

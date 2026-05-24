@@ -12,11 +12,36 @@ const DEFAULT_TASKS = [
 const STATE_KEY = "wt_state_v2";
 const PIN_KEY = "wt_pin";
 
+function localDateKey(date) {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function localMondayKey(date) {
+  const monday = new Date(date);
+  monday.setDate(date.getDate() - ((date.getDay() + 6) % 7));
+  return localDateKey(monday);
+}
+
 function getWeekKey() {
-  const now = new Date();
-  const monday = new Date(now);
-  monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
-  return monday.toISOString().slice(0, 10);
+  return localMondayKey(new Date());
+}
+
+function realignChecksByWeek(checksByWeek) {
+  const src = checksByWeek || {};
+  const out = {};
+  for (const [wk, entries] of Object.entries(src)) {
+    if (!entries || typeof entries !== "object") continue;
+    const parsed = new Date(wk + "T00:00:00");
+    const mondayKey = Number.isNaN(parsed.getTime()) ? wk : localMondayKey(parsed);
+    const target = out[mondayKey] || (out[mondayKey] = {});
+    for (const [k, v] of Object.entries(entries)) {
+      target[k] = !!target[k] || !!v;
+    }
+  }
+  return out;
 }
 
 function formatWeekLabel(weekKey) {
@@ -144,7 +169,7 @@ function migrate(raw) {
       tasks: raw.tasks || {},
       groups: raw.groups || {},
       order: raw.order || [],
-      checksByWeek: raw.checksByWeek || {},
+      checksByWeek: realignChecksByWeek(raw.checksByWeek),
       version: raw.version || 0,
     };
   }
@@ -170,7 +195,7 @@ function migrate(raw) {
     tasks,
     groups: {},
     order,
-    checksByWeek,
+    checksByWeek: realignChecksByWeek(checksByWeek),
     version: raw.version || 0,
   };
 }
